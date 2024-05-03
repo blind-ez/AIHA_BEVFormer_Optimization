@@ -9,10 +9,6 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
-ckpts/
-data/
-ckpts
-data
 test/
 val/
 work_dirs/

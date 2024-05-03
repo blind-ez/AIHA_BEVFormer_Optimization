@@ -226,9 +226,9 @@ def main():
         model.PALETTE = dataset.PALETTE
 
     if not distributed:
-        assert False
-        # model = MMDataParallel(model, device_ids=[0])
-        # outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
+        # assert False
+        model = MMDataParallel(model, device_ids=[0])
+        outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
     else:
         model = MMDistributedDataParallel(
             model.cuda(),
@@ -258,6 +258,18 @@ def main():
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
+
+            if all('sample_token' in output for output in outputs):
+                valid_sample_tokens = list()
+                for output in outputs:
+                    valid_sample_tokens.append(output['sample_token'])
+                    del output['sample_token']
+
+                filtered_data_infos = list()
+                for info in dataset.data_infos:
+                    if info['token'] in valid_sample_tokens:
+                        filtered_data_infos.append(info)
+                dataset.data_infos = filtered_data_infos
 
             print(dataset.evaluate(outputs, **eval_kwargs))
 

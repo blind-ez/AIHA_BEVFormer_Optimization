@@ -556,6 +556,10 @@ class NuScenesEval_custom(NuScenesEval):
                                                      verbose=verbose)
         self.gt_boxes = load_gt(self.nusc, self.eval_set, DetectionBox_modified, verbose=verbose)
 
+        if verbose:
+            print(f'Filtering ground truth annotations to samples used for evaluation: {len(self.pred_boxes)} entries')
+        self.gt_boxes.boxes = {k: self.gt_boxes.boxes[k] for k in self.pred_boxes.sample_tokens}
+
         assert set(self.pred_boxes.sample_tokens) == set(self.gt_boxes.sample_tokens), \
             "Samples in split doesn't match samples in predictions."
 
