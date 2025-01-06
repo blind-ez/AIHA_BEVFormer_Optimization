@@ -25,16 +25,6 @@ from mmcv.runner import force_fp32, auto_fp16
 
 @TRANSFORMER.register_module()
 class PerceptionTransformer(BaseModule):
-    """Implements the Detr3D transformer.
-    Args:
-        as_two_stage (bool): Generate query from encoder features.
-            Default: False.
-        num_feature_levels (int): Number of feature maps from FPN:
-            Default: 4.
-        two_stage_num_proposals (int): Number of proposals when set
-            `as_two_stage` as True. Default: 300.
-    """
-
     def __init__(self,
                  num_feature_levels=4,
                  num_cams=6,
@@ -100,190 +90,139 @@ class PerceptionTransformer(BaseModule):
         xavier_init(self.reference_points, distribution='uniform', bias=0.)
         xavier_init(self.can_bus_mlp, distribution='uniform', bias=0.)
 
-    @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'prev_bev', 'bev_pos'))
-    def get_bev_features(
-            self,
-            mlvl_feats,
-            bev_queries,
-            bev_h,
-            bev_w,
-            grid_length=[0.512, 0.512],
-            bev_pos=None,
-            prev_bev=None,
-            **kwargs):
-        """
-        obtain bev features.
-        """
+    @auto_fp16(apply_to=('mlvl_feats', 'bev_query', 'bev_pos', 'prev_bev'))
+    def preprocess_for_encoder(self,
+                               mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
+                               bev_query, # (1, 200*200, 256)
+                               bev_pos, # (1, 200*200, 256)
+                               prev_bev, # (1, 200*200, 256)
+                               bev_h, # 200
+                               bev_w, # 200
+                               grid_length, # [0.512, 0.512]
+                               img_meta):
 
-        bs = mlvl_feats[0].size(0)
-        bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
-        bev_pos = bev_pos.flatten(2).permute(2, 0, 1)
-
-        # obtain rotation angle and shift with ego motion
-        delta_x = np.array([each['can_bus'][0]
-                           for each in kwargs['img_metas']])
-        delta_y = np.array([each['can_bus'][1]
-                           for each in kwargs['img_metas']])
-        ego_angle = np.array(
-            [each['can_bus'][-2] / np.pi * 180 for each in kwargs['img_metas']])
-        grid_length_y = grid_length[0]
+        # get shift
+        delta_x = np.array([img_meta['can_bus'][0]])
+        delta_y = np.array([img_meta['can_bus'][1]])
+        ego_angle = np.array(img_meta['can_bus'][-2] * (180 / np.pi))
         grid_length_x = grid_length[1]
-        translation_length = np.sqrt(delta_x ** 2 + delta_y ** 2)
-        translation_angle = np.arctan2(delta_y, delta_x) / np.pi * 180
+        grid_length_y = grid_length[0]
+        translation_length = np.sqrt(delta_x**2 + delta_y**2)
+        translation_angle = np.arctan2(delta_y, delta_x) * (180 / np.pi)
         bev_angle = ego_angle - translation_angle
-        shift_y = translation_length * \
-            np.cos(bev_angle / 180 * np.pi) / grid_length_y / bev_h
-        shift_x = translation_length * \
-            np.sin(bev_angle / 180 * np.pi) / grid_length_x / bev_w
-        shift_y = shift_y * self.use_shift
-        shift_x = shift_x * self.use_shift
-        shift = bev_queries.new_tensor(
-            [shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
+        shift_x = translation_length * np.sin(bev_angle * (np.pi / 180)) / grid_length_x / bev_w
+        shift_y = translation_length * np.cos(bev_angle * (np.pi / 180)) / grid_length_y / bev_h
+        shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
 
-        if prev_bev is not None:
-            if prev_bev.shape[1] == bev_h * bev_w:
-                prev_bev = prev_bev.permute(1, 0, 2)
-            if self.rotate_prev_bev:
-                for i in range(bs):
-                    # num_prev_bev = prev_bev.size(1)
-                    rotation_angle = kwargs['img_metas'][i]['can_bus'][-1]
-                    tmp_prev_bev = prev_bev[:, i].reshape(
-                        bev_h, bev_w, -1).permute(2, 0, 1)
-                    tmp_prev_bev = rotate(tmp_prev_bev, rotation_angle,
-                                          center=self.rotate_center)
-                    tmp_prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(
-                        bev_h * bev_w, 1, -1)
-                    prev_bev[:, i] = tmp_prev_bev[:, 0]
+        # integrate can_bus info into bev_query
+        can_bus = torch.tensor([img_meta['can_bus']], device=bev_query.device, dtype=bev_query.dtype) # (1, 18)
+        can_bus = self.can_bus_mlp(can_bus) # (1, 256)
+        bev_query = bev_query + can_bus[None, :, :]
 
-        # add can bus signals
-        can_bus = bev_queries.new_tensor(
-            [each['can_bus'] for each in kwargs['img_metas']])  # [:, :]
-        can_bus = self.can_bus_mlp(can_bus)[None, :, :]
-        bev_queries = bev_queries + can_bus * self.use_can_bus
+        # integrate camera info and level info into mlvl_feats
+        updated_feats = []
+        for lvl, feat in enumerate(mlvl_feats):
+            feat = feat.squeeze() # (6, 256, h, w)
+            feat = feat.flatten(2) # (6, 256, h*w)
+            feat = feat.permute(0, 2, 1) # (6, h*w, 256)
+            feat = feat + self.cams_embeds[:, None, :].to(feat.dtype)
+            feat = feat + self.level_embeds[None, lvl:lvl+1, :].to(feat.dtype)
+            updated_feats.append(feat)
+        feats_flatten = torch.cat(updated_feats, 1) # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
 
-        feat_flatten = []
+        # store the spatial dimensions for each level feature map and computes the cumulative starting index for each level
         spatial_shapes = []
         for lvl, feat in enumerate(mlvl_feats):
-            bs, num_cam, c, h, w = feat.shape
-            spatial_shape = (h, w)
-            feat = feat.flatten(3).permute(1, 0, 3, 2)
-            if self.use_cams_embeds:
-                feat = feat + self.cams_embeds[:, None, None, :].to(feat.dtype)
-            feat = feat + self.level_embeds[None,
-                                            None, lvl:lvl + 1, :].to(feat.dtype)
-            spatial_shapes.append(spatial_shape)
-            feat_flatten.append(feat)
+            _, _, _, h, w = feat.shape
+            spatial_shapes.append((h, w))
+        spatial_shapes = torch.tensor(spatial_shapes, dtype=torch.long, device=bev_pos.device) # [[116, 200], [58, 100], [29, 50], [15, 25]]
+        level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])) # [0, 23200, 29000, 30450]
 
-        feat_flatten = torch.cat(feat_flatten, 2)
-        spatial_shapes = torch.as_tensor(
-            spatial_shapes, dtype=torch.long, device=bev_pos.device)
-        level_start_index = torch.cat((spatial_shapes.new_zeros(
-            (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        # rotate prev_bev based on the current timestamp and stack it with the current bev_query
+        if prev_bev is not None:
+            rotation_angle = img_meta['can_bus'][-1]
+            tmp_prev_bev = prev_bev.squeeze().reshape(bev_h, bev_w, -1).permute(2, 0, 1) # (256, 200, 200)
+            tmp_prev_bev = rotate(tmp_prev_bev, rotation_angle, center=self.rotate_center) # (256, 200, 200)
+            prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(1, bev_h * bev_w, -1) # (1, 200*200, 256)
+            stacked_bev = torch.stack([prev_bev, bev_query], 1) # (1, 2, 200*200, 256)
+            stacked_bev = stacked_bev.reshape(2, bev_h * bev_w, -1) # (2, 200*200, 256)
+        else:
+            stacked_bev = prev_bev # None
+            
+        return shift, bev_query, feats_flatten, spatial_shapes, level_start_index, stacked_bev
 
-        feat_flatten = feat_flatten.permute(
-            0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
+    @auto_fp16(apply_to=('mlvl_feats', 'bev_query', 'bev_pos', 'prev_bev'))
+    def get_bev_features(self,
+                         mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
+                         bev_query, # (1, 200*200, 256)
+                         bev_pos, # (1, 200*200, 256)
+                         prev_bev, # (1, 200*200, 256)
+                         bev_h, # 200
+                         bev_w, # 200
+                         grid_length, # [0.512, 0.512]
+                         img_meta,
+                         **kwargs):
 
-        bev_embed = self.encoder(
-            bev_queries,
-            feat_flatten,
-            feat_flatten,
-            bev_h=bev_h,
-            bev_w=bev_w,
-            bev_pos=bev_pos,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            prev_bev=prev_bev,
-            shift=shift,
-            **kwargs
-        )
+        shift, bev_query, feats_flatten, spatial_shapes, level_start_index, stacked_bev = self.preprocess_for_encoder(mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
+                                                                                                                      bev_query, # (1, 200*200, 256)
+                                                                                                                      bev_pos, # (1, 200*200, 256)
+                                                                                                                      prev_bev, # (1, 200*200, 256)
+                                                                                                                      bev_h, # 200
+                                                                                                                      bev_w, # 200
+                                                                                                                      grid_length, # [0.512, 0.512]
+                                                                                                                      img_meta)
 
-        return bev_embed
+        bev_query = self.encoder(bev_query=bev_query, # (1, 200*200, 256)
+                                 value=feats_flatten, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
+                                 bev_pos=bev_pos, # (1, 200*200, 256)
+                                 stacked_bev=stacked_bev, # (2, 200*200, 256)
+                                 bev_h=bev_h, # 200
+                                 bev_w=bev_w, # 200
+                                 spatial_shapes=spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
+                                 level_start_index=level_start_index, # [0, 23200, 29000, 30450]
+                                 shift=shift,
+                                 img_meta=img_meta,
+                                 **kwargs)
 
-    @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'object_query_embed', 'prev_bev', 'bev_pos'))
+        return bev_query
+
+    @auto_fp16(apply_to=('mlvl_feats', 'bev_query', 'bev_pos', 'object_query', 'object_pos', 'prev_bev'))
     def forward(self,
-                mlvl_feats,
-                bev_queries,
-                object_query_embed,
-                bev_h,
-                bev_w,
-                grid_length=[0.512, 0.512],
-                bev_pos=None,
-                reg_branches=None,
-                cls_branches=None,
-                prev_bev=None,
-                **kwargs):
-        """Forward function for `Detr3DTransformer`.
-        Args:
-            mlvl_feats (list(Tensor)): Input queries from
-                different level. Each element has shape
-                [bs, num_cams, embed_dims, h, w].
-            bev_queries (Tensor): (bev_h*bev_w, c)
-            bev_pos (Tensor): (bs, embed_dims, bev_h, bev_w)
-            object_query_embed (Tensor): The query embedding for decoder,
-                with shape [num_query, c].
-            reg_branches (obj:`nn.ModuleList`): Regression heads for
-                feature maps from each decoder layer. Only would
-                be passed when `with_box_refine` is True. Default to None.
-        Returns:
-            tuple[Tensor]: results of decoder containing the following tensor.
-                - bev_embed: BEV features
-                - inter_states: Outputs from decoder. If
-                    return_intermediate_dec is True output has shape \
-                      (num_dec_layers, bs, num_query, embed_dims), else has \
-                      shape (1, bs, num_query, embed_dims).
-                - init_reference_out: The initial value of reference \
-                    points, has shape (bs, num_queries, 4).
-                - inter_references_out: The internal value of reference \
-                    points in decoder, has shape \
-                    (num_dec_layers, bs,num_query, embed_dims)
-                - enc_outputs_class: The classification score of \
-                    proposals generated from \
-                    encoder's feature maps, has shape \
-                    (batch, h*w, num_classes). \
-                    Only would be returned when `as_two_stage` is True, \
-                    otherwise None.
-                - enc_outputs_coord_unact: The regression results \
-                    generated from encoder's feature maps., has shape \
-                    (batch, h*w, 4). Only would \
-                    be returned when `as_two_stage` is True, \
-                    otherwise None.
-        """
+                mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
+                bev_query, # (1, 200*200, 256)
+                bev_pos, # (1, 200*200, 256)
+                object_query, # (1, 900, 256)
+                object_pos, # (1, 900, 256)
+                prev_bev, # (1, 200*200, 256)
+                bev_h, # 200
+                bev_w, # 200
+                grid_length, # [0.512, 0.512]
+                pc_range,
+                img_meta,
+                reg_branches,
+                cls_branches):
 
-        bev_embed = self.get_bev_features(
-            mlvl_feats,
-            bev_queries,
-            bev_h,
-            bev_w,
-            grid_length=grid_length,
-            bev_pos=bev_pos,
-            prev_bev=prev_bev,
-            **kwargs)  # bev_embed shape: bs, bev_h*bev_w, embed_dims
+        bev_query = self.get_bev_features(mlvl_feats=mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
+                                          bev_query=bev_query, # (1, 200*200, 256)
+                                          bev_pos=bev_pos, # (1, 200*200, 256)
+                                          prev_bev=prev_bev, # (1, 200*200, 256)
+                                          bev_h=bev_h, # 200
+                                          bev_w=bev_w, # 200
+                                          grid_length=grid_length, # [0.512, 0.512]
+                                          pc_range=pc_range,
+                                          img_meta=img_meta)
 
-        bs = mlvl_feats[0].size(0)
-        query_pos, query = torch.split(
-            object_query_embed, self.embed_dims, dim=1)
-        query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
-        query = query.unsqueeze(0).expand(bs, -1, -1)
-        reference_points = self.reference_points(query_pos)
-        reference_points = reference_points.sigmoid()
-        init_reference_out = reference_points
+        reference_points = self.reference_points(object_pos) # (1, 900, 3)
+        reference_points = reference_points.sigmoid() # (1, 900, 3)
 
-        query = query.permute(1, 0, 2)
-        query_pos = query_pos.permute(1, 0, 2)
-        bev_embed = bev_embed.permute(1, 0, 2)
+        outputs_classes, outputs_bboxes = self.decoder(query=object_query, # (1, 900, 256)
+                                                       value=bev_query, # (1, 200*200, 256)
+                                                       query_pos=object_pos, # (1, 900, 256)
+                                                       reference_points=reference_points, # (1, 900, 3)
+                                                       reg_branches=reg_branches,
+                                                       cls_branches=cls_branches,
+                                                       pc_range=pc_range,
+                                                       spatial_shapes=torch.tensor([[bev_h, bev_w]], device=object_query.device), # [[200, 200]]
+                                                       level_start_index=torch.tensor([0], device=object_query.device)) # [0]
 
-        inter_states, inter_references = self.decoder(
-            query=query,
-            key=None,
-            value=bev_embed,
-            query_pos=query_pos,
-            reference_points=reference_points,
-            reg_branches=reg_branches,
-            cls_branches=cls_branches,
-            spatial_shapes=torch.tensor([[bev_h, bev_w]], device=query.device),
-            level_start_index=torch.tensor([0], device=query.device),
-            **kwargs)
-
-        inter_references_out = inter_references
-
-        return bev_embed, inter_states, init_reference_out, inter_references_out
+        return bev_query, outputs_classes, outputs_bboxes
