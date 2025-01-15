@@ -218,7 +218,7 @@ class BEVFormer(MVXTwoStageDetector):
     def simple_test(self, img_meta, img, prev_bev, rescale=False, **kwargs):
         mlvl_feats = self.extract_feat(img=img) # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
 
-        outs = self.pts_bbox_head(mlvl_feats=mlvl_feats, prev_bev=prev_bev, img_meta=img_meta)
+        outs = self.pts_bbox_head(mlvl_feats=mlvl_feats, prev_bev=prev_bev, img_meta=img_meta, **kwargs)
 
         new_prev_bev = outs['bev_query']
 

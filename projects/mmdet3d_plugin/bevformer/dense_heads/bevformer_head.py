@@ -104,7 +104,7 @@ class BEVFormerHead(DETRHead):
                 nn.init.constant_(m[-1].bias, bias_init)
 
     @auto_fp16(apply_to=('mlvl_feats'))
-    def forward(self, mlvl_feats, img_meta, prev_bev, only_bev=False):
+    def forward(self, mlvl_feats, img_meta, prev_bev, only_bev=False, **kwargs):
         bev_query = self.bev_embedding.weight.to(mlvl_feats[0].dtype) # (200*200, 256)
         bev_query = bev_query.unsqueeze(0) # (1, 200*200, 256)
         bev_mask = torch.zeros((1, self.bev_h, self.bev_w), device=bev_query.device, dtype=mlvl_feats[0].dtype) # (1, 200, 200)
@@ -138,7 +138,8 @@ class BEVFormerHead(DETRHead):
                                                                           pc_range=self.pc_range,
                                                                           img_meta=img_meta,
                                                                           reg_branches=self.reg_branches,
-                                                                          cls_branches=self.cls_branches)
+                                                                          cls_branches=self.cls_branches,
+                                                                          **kwargs)
 
         outs = {'bev_query': bev_query,
                 'all_cls_scores': outputs_classes,

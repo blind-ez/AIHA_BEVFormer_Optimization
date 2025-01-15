@@ -1,0 +1,3 @@
+CUDA_VISIBLE_DEVICSE=0,1,2,3 PORT=11 tools/dist_train.sh projects/configs/bevformer/bevformer_tiny_bevseg.py 4 --work-dir ./exps/bevformer_bev_occ_only/ --cfg-options model.pts_bbox_head.occ_layer=[2]
+CUDA_VISIBLE_DEVICSE=0,1,2,3 PORT=11 tools/dist_train.sh projects/configs/bevformer/bevformer_tiny_bevseg.py 4 --work-dir ./exps/bevformer_bev_occ_only/ --cfg-options model.pts_bbox_head.occ_layer=[1,2]
+CUDA_VISIBLE_DEVICSE=0,1,2,3 PORT=11 tools/dist_train.sh projects/configs/bevformer/bevformer_tiny_bevseg.py 4 --work-dir ./exps/bevformer_bev_occ_only/ --cfg-options model.pts_bbox_head.occ_layer=[0,1,2]
