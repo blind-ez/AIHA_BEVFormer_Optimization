@@ -200,7 +200,8 @@ class PerceptionTransformer(BaseModule):
                 pc_range,
                 img_meta,
                 reg_branches,
-                cls_branches):
+                cls_branches,
+                **kwargs):
 
         bev_query = self.get_bev_features(mlvl_feats=mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
                                           bev_query=bev_query, # (1, 200*200, 256)
@@ -210,7 +211,8 @@ class PerceptionTransformer(BaseModule):
                                           bev_w=bev_w, # 200
                                           grid_length=grid_length, # [0.512, 0.512]
                                           pc_range=pc_range,
-                                          img_meta=img_meta)
+                                          img_meta=img_meta,
+                                          **kwargs)
 
         reference_points = self.reference_points(object_pos) # (1, 900, 3)
         reference_points = reference_points.sigmoid() # (1, 900, 3)
