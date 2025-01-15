@@ -179,7 +179,9 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 level_start_index, # [0, 23200, 29000, 30450]
                 ref_2d_hybrid, # (2, 200*200, 1, 2)
                 ref_3d_projected_to_each_cam, # (6, 1, 200*200, 4, 2)
-                cam_mask): # (6, 1, 200*200, 4)
+                cam_mask, # (6, 1, 200*200, 4)
+                occ_mask=None,
+                **kwargs):
 
         norm_index = 0
         attn_index = 0
@@ -192,7 +194,8 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                                                     query_pos=bev_pos, # (1, 200*200, 256)
                                                     spatial_shapes=torch.tensor([[bev_h, bev_w]], device=query.device), # [[200, 200]]
                                                     level_start_index=torch.tensor([0], device=query.device), # [0]
-                                                    ref_2d_hybrid=ref_2d_hybrid) # (2, 200*200, 1, 2)
+                                                    ref_2d_hybrid=ref_2d_hybrid, # (2, 200*200, 1, 2)
+                                                    occ_mask=occ_mask)
                 attn_index += 1
 
             elif layer == 'norm':
@@ -205,11 +208,17 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                                                     spatial_shapes=spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
                                                     level_start_index=level_start_index, # [0, 23200, 29000, 30450]
                                                     ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam, # (6, 1, 200*200, 4, 2)
-                                                    cam_mask=cam_mask) # (6, 1, 200*200, 4)
+                                                    cam_mask=cam_mask, # (6, 1, 200*200, 4)
+                                                    occ_mask=occ_mask)
                 attn_index += 1
 
             elif layer == 'ffn':
                 query = self.ffns[ffn_index](query, None)
                 ffn_index += 1
+
+        if occ_mask is not None:
+            query_zero_padded = query.new_zeros([1, bev_h * bev_w, self.embed_dims]) # (1, 200*200, 256)
+            query_zero_padded[:, occ_mask, :] = query
+            return query_zero_padded
 
         return query

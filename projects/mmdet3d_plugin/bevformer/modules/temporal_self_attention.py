@@ -101,44 +101,91 @@ class TemporalSelfAttention(BaseModule):
                 query_pos, # (1, 200*200, 256)
                 spatial_shapes, # [[200, 200]]
                 level_start_index, # [0]
-                ref_2d_hybrid): # (2, 200*200, 1, 2)
+                ref_2d_hybrid, # (2, 200*200, 1, 2)
+                occ_mask):
 
-        _, num_bev_cell, _ = query.shape # 200*200
+        if occ_mask is not None:
+            _, num_bev_cells, _ = query.shape # 200*200
+            num_activated_queries = len(occ_mask)
 
-        identity = query # (1, 200*200, 256)
+            if value is None:
+                value = query.repeat(2, 1, 1) # (2, 200*200, 256)
 
-        if value is None:
-            value = query.repeat(2, 1, 1) # (2, 200*200, 256)
+            query = query[:, occ_mask, :] # (1, num_activated_queries, 256)
+            query_pos = query_pos[:, occ_mask, :] # (1, num_activated_queries, 256)
 
-        query = query + query_pos # (1, 200*200, 256)
-        query = torch.cat([value[:1], query], -1) # (1, 200*200, 256+256)
+            identity = query # (1, num_activated_queries, 256)
 
-        sampling_offsets = self.sampling_offsets(query) # (1, 200*200, 128)
-        sampling_offsets = sampling_offsets.view(1, num_bev_cell, self.num_heads, 2, 1, self.num_points, 2) # (1, 200*200, 8, 2, 1, 4, 2)
-        sampling_offsets = sampling_offsets.permute(0, 3, 1, 2, 4, 5, 6).reshape(2, num_bev_cell, self.num_heads, 1, self.num_points, 2) # (2, 200*200, 8, 1, 4, 2)
-        offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1) # [[200, 200]]
-        sampling_offsets = sampling_offsets / offset_normalizer[None, None, None, :, None, :] # (2, 200*200, 8, 1, 4, 2)
-        sampling_locations = ref_2d_hybrid[:, :, None, :, None, :] + sampling_offsets # (2, 200*200, 8, 1, 4, 2)
+            query = query + query_pos # (1, num_activated_queries, 256)
+            query = torch.cat([value[:1][:, occ_mask, :], query], -1) # (1, num_activated_queries, 256+256)
 
-        attention_weights = self.attention_weights(query) # (1, 200*200, 64)
-        attention_weights = attention_weights.view(1, num_bev_cell, self.num_heads, 2, 1, self.num_points) # (1, 200*200, 8, 2, 1, 4)
-        attention_weights = attention_weights.permute(0, 3, 1, 2, 4, 5).reshape(2, num_bev_cell, self.num_heads, 1, self.num_points).contiguous() # (2, 200*200, 8, 1, 4)
-        attention_weights = attention_weights.softmax(-1) # (2, 200*200, 8, 1, 4)
+            sampling_offsets = self.sampling_offsets(query) # (1, num_activated_queries, 128)
+            sampling_offsets = sampling_offsets.view(1, num_activated_queries, self.num_heads, 2, 1, self.num_points, 2) # (1, num_activated_queries, 8, 2, 1, 4, 2)
+            sampling_offsets = sampling_offsets.permute(0, 3, 1, 2, 4, 5, 6).reshape(2, num_activated_queries, self.num_heads, 1, self.num_points, 2) # (2, num_activated_queries, 8, 1, 4, 2)
+            offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1) # [[200, 200]]
+            sampling_offsets = sampling_offsets / offset_normalizer[None, None, None, :, None, :] # (2, num_activated_queries, 8, 1, 4, 2)
+            sampling_locations = ref_2d_hybrid[:, occ_mask, :, :][:, :, None, :, None, :] + sampling_offsets # (2, num_activated_queries, 8, 1, 4, 2)
 
-        value = self.value_proj(value) # (2, 200*200, 256)
-        value = value.reshape(2, num_bev_cell, self.num_heads, -1) # (2, 200*200, 8, 32)
+            attention_weights = self.attention_weights(query) # (1, num_activated_queries, 64)
+            attention_weights = attention_weights.view(1, num_activated_queries, self.num_heads, 2, 1, self.num_points) # (1, num_activated_queries, 8, 2, 1, 4)
+            attention_weights = attention_weights.permute(0, 3, 1, 2, 4, 5).reshape(2, num_activated_queries, self.num_heads, 1, self.num_points).contiguous() # (2, num_activated_queries, 8, 1, 4)
+            attention_weights = attention_weights.softmax(-1) # (2, num_activated_queries, 8, 1, 4)
 
-        MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-        output = MultiScaleDeformableAttnFunction.apply(value, # (2, 200*200, 8, 32)
-                                                        spatial_shapes, # [[200, 200]]
-                                                        level_start_index, # [0]
-                                                        sampling_locations, # (2, 200*200, 8, 1, 4, 2)
-                                                        attention_weights, # (2, 200*200, 8, 1, 4)
-                                                        self.im2col_step) # 64
+            value = self.value_proj(value) # (2, 200*200, 256)
+            value = value.reshape(2, num_bev_cells, self.num_heads, -1) # (2, 200*200, 8, 32)
 
-        # fuse history value and current value
-        output = output.permute(1, 2, 0) # (200*200, 256, 2)
-        output = output.mean(-1) # (200*200, 256)
-        output = self.output_proj(output.unsqueeze(0)) # (1, 200*200, 256)
+            MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
+            output = MultiScaleDeformableAttnFunction.apply(value, # (2, 200*200, 8, 32)
+                                                            spatial_shapes, # [[200, 200]]
+                                                            level_start_index, # [0]
+                                                            sampling_locations.contiguous(), # (2, num_activated_queries, 8, 1, 4, 2)
+                                                            attention_weights, # (2, num_activated_queries, 8, 1, 4)
+                                                            self.im2col_step) # 64
 
-        return self.dropout(output) + identity
+            # fuse history value and current value
+            output = output.permute(1, 2, 0) # (num_activated_queries, 256, 2)
+            output = output.mean(-1) # (num_activated_queries, 256)
+            output = self.output_proj(output.unsqueeze(0)) # (1, num_activated_queries, 256)
+
+            return self.dropout(output) + identity
+
+        else:
+            _, num_bev_cell, _ = query.shape # 200*200
+
+            identity = query # (1, 200*200, 256)
+
+            if value is None:
+                value = query.repeat(2, 1, 1) # (2, 200*200, 256)
+
+            query = query + query_pos # (1, 200*200, 256)
+            query = torch.cat([value[:1], query], -1) # (1, 200*200, 256+256)
+
+            sampling_offsets = self.sampling_offsets(query) # (1, 200*200, 128)
+            sampling_offsets = sampling_offsets.view(1, num_bev_cell, self.num_heads, 2, 1, self.num_points, 2) # (1, 200*200, 8, 2, 1, 4, 2)
+            sampling_offsets = sampling_offsets.permute(0, 3, 1, 2, 4, 5, 6).reshape(2, num_bev_cell, self.num_heads, 1, self.num_points, 2) # (2, 200*200, 8, 1, 4, 2)
+            offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1) # [[200, 200]]
+            sampling_offsets = sampling_offsets / offset_normalizer[None, None, None, :, None, :] # (2, 200*200, 8, 1, 4, 2)
+            sampling_locations = ref_2d_hybrid[:, :, None, :, None, :] + sampling_offsets # (2, 200*200, 8, 1, 4, 2)
+
+            attention_weights = self.attention_weights(query) # (1, 200*200, 64)
+            attention_weights = attention_weights.view(1, num_bev_cell, self.num_heads, 2, 1, self.num_points) # (1, 200*200, 8, 2, 1, 4)
+            attention_weights = attention_weights.permute(0, 3, 1, 2, 4, 5).reshape(2, num_bev_cell, self.num_heads, 1, self.num_points).contiguous() # (2, 200*200, 8, 1, 4)
+            attention_weights = attention_weights.softmax(-1) # (2, 200*200, 8, 1, 4)
+
+            value = self.value_proj(value) # (2, 200*200, 256)
+            value = value.reshape(2, num_bev_cell, self.num_heads, -1) # (2, 200*200, 8, 32)
+
+            MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
+            output = MultiScaleDeformableAttnFunction.apply(value, # (2, 200*200, 8, 32)
+                                                            spatial_shapes, # [[200, 200]]
+                                                            level_start_index, # [0]
+                                                            sampling_locations, # (2, 200*200, 8, 1, 4, 2)
+                                                            attention_weights, # (2, 200*200, 8, 1, 4)
+                                                            self.im2col_step) # 64
+
+            # fuse history value and current value
+            output = output.permute(1, 2, 0) # (200*200, 256, 2)
+            output = output.mean(-1) # (200*200, 256)
+            output = self.output_proj(output.unsqueeze(0)) # (1, 200*200, 256)
+
+            return self.dropout(output) + identity

@@ -62,47 +62,95 @@ class SpatialCrossAttention(BaseModule):
                 spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
                 level_start_index, # [0, 23200, 29000, 30450]
                 ref_3d_projected_to_each_cam, # (6, 1, 200*200, 4, 2)
-                cam_mask): # (6, 1, 200*200, 4)
+                cam_mask, # (6, 1, 200*200, 4)
+                occ_mask):
 
-        _, _, _, num_points_in_pillar, _ = ref_3d_projected_to_each_cam.shape # 4
+        if occ_mask is not None:
+            _, _, _, num_points_in_pillar, _ = ref_3d_projected_to_each_cam.shape # 4
 
-        identity = query # (1, 200*200, 256)
+            ref_3d_projected_to_each_cam = ref_3d_projected_to_each_cam[:, :, occ_mask, :, :] # (6, 1, num_activated_queries, 4, 2)
+            cam_mask = cam_mask[:, :, occ_mask, :] # (6, 1, num_activated_queries, 4)
 
-        indices = []
-        for mask_per_cam in cam_mask:
-            valid_cell_index_per_cam = mask_per_cam[0].sum(-1).nonzero().squeeze(-1)
-            indices.append(valid_cell_index_per_cam)
-        max_num = max([len(each) for each in indices])
+            identity = query # (1, num_activated_queries, 256)
 
-        # each camera only interacts with its corresponding BEV queries
-        # this step can greatly save GPU memory
-        query_rebatch = query.new_zeros([6, max_num, self.embed_dims]) # (6, max_num, 256)
-        ref_3d_projected_to_each_cam_rebatch = ref_3d_projected_to_each_cam.new_zeros([6, max_num, num_points_in_pillar, 2]) # (6, max_num, 4, 2)
-        for i, ref_per_cam in enumerate(ref_3d_projected_to_each_cam):   
-            valid_cell_index_per_cam = indices[i]
-            query_rebatch[i, :len(valid_cell_index_per_cam)] = query[:, valid_cell_index_per_cam, :]
-            ref_3d_projected_to_each_cam_rebatch[i, :len(valid_cell_index_per_cam)] = ref_per_cam[:, valid_cell_index_per_cam, :, :]
+            indices = []
+            for mask_per_cam in cam_mask:
+                valid_gt_index_per_cam = mask_per_cam[0].sum(-1).nonzero().squeeze()
+                indices.append(valid_gt_index_per_cam)
+            max_num = max([each.numel() for each in indices])
 
-        output = self.deformable_attention(query=query_rebatch, # (6, max_num, 256)
-                                           value=value, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
-                                           ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam_rebatch, # (6, max_num, 4, 2)
-                                           spatial_shapes=spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
-                                           level_start_index=level_start_index) # [0, 23200, 29000, 30450]
+            # each camera only interacts with its corresponding BEV queries
+            # this step can greatly save GPU memory
+            query_rebatch = query.new_zeros([6, max_num, self.embed_dims]) # (6, max_num, 256)
+            ref_3d_projected_to_each_cam_rebatch = ref_3d_projected_to_each_cam.new_zeros([6, max_num, num_points_in_pillar, 2]) # (6, max_num, 4, 2)
+            for i, ref_per_cam in enumerate(ref_3d_projected_to_each_cam):
+                valid_gt_index_per_cam = indices[i]
+                if valid_gt_index_per_cam.numel() != 0:
+                    query_rebatch[i, :valid_gt_index_per_cam.numel()] = query[:, valid_gt_index_per_cam, :]
+                    ref_3d_projected_to_each_cam_rebatch[i, :valid_gt_index_per_cam.numel()] = ref_per_cam[:, valid_gt_index_per_cam, :, :]
 
-        # assign attention results for each camera
-        slots = torch.zeros_like(query) # (1, 200*200, 256)
-        for i, valid_cell_index_per_cam in enumerate(indices):
-            slots[:, valid_cell_index_per_cam, :] += output[i, :len(valid_cell_index_per_cam)]
+            output = self.deformable_attention(query=query_rebatch, # (6, max_num, 256)
+                                               value=value, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
+                                               ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam_rebatch, # (6, max_num, 4, 2)
+                                               spatial_shapes=spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
+                                               level_start_index=level_start_index) # [0, 23200, 29000, 30450]
 
-        # calculate the average for bev cells which correspond to more than one camera
-        count = cam_mask.sum(-1) > 0 # (6, 1, 200*200)
-        count = count.permute(1, 2, 0).sum(-1) # (1, 200*200)
-        count = torch.clamp(count, min=1.0) # (1, 200*200)
-        slots = slots / count[..., None] # (1, 200*200, 256)
+            # assign attention results for each camera
+            slots = torch.zeros_like(query) # (1, num_activated_queries, 256)
+            for i, valid_gt_index_per_cam in enumerate(indices):
+                if valid_gt_index_per_cam.numel() != 0:
+                    slots[:, valid_gt_index_per_cam, :] += output[i, :valid_gt_index_per_cam.numel()]
 
-        slots = self.output_proj(slots) # (1, 200*200, 256)
+            # calculate the average for bev cells which correspond to more than one camera
+            count = cam_mask.sum(-1) > 0 # (6, 1, num_activated_queries)
+            count = count.permute(1, 2, 0).sum(-1) # (1, num_activated_queries)
+            count = torch.clamp(count, min=1.0) # (1, num_activated_queries)
+            slots = slots / count[..., None] # (1, num_activated_queries, 256)
 
-        return self.dropout(slots) + identity
+            slots = self.output_proj(slots) # (1, num_activated_queries, 256)
+
+            return self.dropout(slots) + identity
+
+        else:
+            _, _, _, num_points_in_pillar, _ = ref_3d_projected_to_each_cam.shape # 4
+
+            identity = query # (1, 200*200, 256)
+
+            indices = []
+            for mask_per_cam in cam_mask:
+                valid_cell_index_per_cam = mask_per_cam[0].sum(-1).nonzero().squeeze(-1)
+                indices.append(valid_cell_index_per_cam)
+            max_num = max([len(each) for each in indices])
+
+            # each camera only interacts with its corresponding BEV queries
+            # this step can greatly save GPU memory
+            query_rebatch = query.new_zeros([6, max_num, self.embed_dims]) # (6, max_num, 256)
+            ref_3d_projected_to_each_cam_rebatch = ref_3d_projected_to_each_cam.new_zeros([6, max_num, num_points_in_pillar, 2]) # (6, max_num, 4, 2)
+            for i, ref_per_cam in enumerate(ref_3d_projected_to_each_cam):   
+                valid_cell_index_per_cam = indices[i]
+                query_rebatch[i, :len(valid_cell_index_per_cam)] = query[:, valid_cell_index_per_cam, :]
+                ref_3d_projected_to_each_cam_rebatch[i, :len(valid_cell_index_per_cam)] = ref_per_cam[:, valid_cell_index_per_cam, :, :]
+
+            output = self.deformable_attention(query=query_rebatch, # (6, max_num, 256)
+                                               value=value, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
+                                               ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam_rebatch, # (6, max_num, 4, 2)
+                                               spatial_shapes=spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
+                                               level_start_index=level_start_index) # [0, 23200, 29000, 30450]
+
+            # assign attention results for each camera
+            slots = torch.zeros_like(query) # (1, 200*200, 256)
+            for i, valid_cell_index_per_cam in enumerate(indices):
+                slots[:, valid_cell_index_per_cam, :] += output[i, :len(valid_cell_index_per_cam)]
+
+            # calculate the average for bev cells which correspond to more than one camera
+            count = cam_mask.sum(-1) > 0 # (6, 1, 200*200)
+            count = count.permute(1, 2, 0).sum(-1) # (1, 200*200)
+            count = torch.clamp(count, min=1.0) # (1, 200*200)
+            slots = slots / count[..., None] # (1, 200*200, 256)
+
+            slots = self.output_proj(slots) # (1, 200*200, 256)
+
+            return self.dropout(slots) + identity
 
 
 @ATTENTION.register_module()
