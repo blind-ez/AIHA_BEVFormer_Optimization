@@ -221,7 +221,7 @@ class BEVFormer(MVXTwoStageDetector):
         # print(bbox_result[0]['pts_bbox']['scores_3d'])
         # print('\n')
         # breakpoint()
-        return bbox_result
+        return bbox_result, kwargs['output_logger'], kwargs['mask_logger']
 
     def simple_test(self, img_meta, img, prev_bev, rescale=False, **kwargs):
         mlvl_feats = self.extract_feat(img=img) # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)

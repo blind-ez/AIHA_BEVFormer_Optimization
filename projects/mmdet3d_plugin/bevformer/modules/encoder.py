@@ -129,32 +129,29 @@ class BEVFormerEncoder(TransformerLayerSequence):
                                                                                           device=bev_query.device,
                                                                                           dtype=bev_query.dtype) # (2, 200*200, 1, 2), (1, 4, 200*200, 3), (6, 1, 200*200, 4)
 
-        # n = 49
-        # bev_size = bev_h
+        if kwargs['prev_preds'] is not None:
+            n = 25
+            bev_size = bev_h
 
-        # gt_bboxes = kwargs['gt_bboxes_3d'][0][0].tensor.clone().detach().to(bev_query.device)
-        # gt_labels = kwargs['gt_labels_3d'][0][0].clone().detach().to(bev_query.device)
+            prev_preds = kwargs['prev_preds']
+            normalized_coords = (prev_preds - (-51.2)) / 102.4
+            bev_coords = (normalized_coords * bev_size).to(torch.long)
 
-        # gt_bboxes = gt_bboxes[gt_labels!=-1]
-        # gt_labels = gt_labels[gt_labels!=-1]
+            xs = (torch.arange(n)-(n//2))[:, None].repeat(1, n).to(bev_query.device)
+            ys = (torch.arange(n)-(n//2))[None, :].repeat(n, 1).to(bev_query.device)
+            offsets = torch.stack((xs, ys), dim=2).view(-1, 2)[None, :, :]
 
-        # if len(gt_bboxes)==0:
-        #     return bev_query
+            expanded_coords = bev_coords[:, None, :] + offsets
+            unique_coords = torch.unique(expanded_coords.view(-1, 2), dim=0)
+            valid_mask = ((unique_coords < bev_size) & (unique_coords >= 0)).all(1)
+            valid_coords = unique_coords[valid_mask]
 
-        # bboxes_coords = gt_bboxes[:, :2]
-        # normalized_bboxes_coords = (bboxes_coords - (-51.2)) / 102.4
-        # bev_coords = (normalized_bboxes_coords * bev_size).to(torch.long)
+            occ_mask = (valid_coords[:, 1] * bev_size) + valid_coords[:, 0]
+            kwargs['occ_mask'] = occ_mask
 
-        # xs = (torch.arange(n)-(n//2))[:, None].repeat(1, n).to(bev_query.device)
-        # ys = (torch.arange(n)-(n//2))[None, :].repeat(n, 1).to(bev_query.device)
-        # offsets = torch.stack((xs, ys), dim=2).view(-1, 2)[None, :, :]
-
-        # expanded_coords = bev_coords[:, None, :] + offsets
-        # unique_coords = torch.unique(expanded_coords.view(-1, 2), dim=0)
-        # valid_mask = ((unique_coords < bev_size) & (unique_coords >= 0)).all(1)
-        # valid_coords = unique_coords[valid_mask]
-        # occ_mask = (valid_coords[:, 1] * bev_size) + valid_coords[:, 0]
-        # kwargs['occ_mask'] = occ_mask
+            kwargs['mask_logger'].append(valid_coords.to('cpu'))
+        else:
+            kwargs['mask_logger'].append(None)
 
         for lid, layer in enumerate(self.layers):
             bev_query = layer(query=bev_query, # (1, 200*200, 256)

@@ -116,28 +116,21 @@ class PerceptionTransformer(BaseModule):
         shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
 
         # align previous predictions
+        shifted_coords = None
         if prev_bev is not None:
-            prev_scores, _ = kwargs['prev_cls_scores'].max(1)
-            prev_scores = prev_scores.sigmoid()
-            mask = prev_scores > 0.05
+            prev_scores = kwargs['prev_cls_scores'].max(1).values.sigmoid()
+            mask = prev_scores > 0.33
+            if mask.sum() != 0:
+                prev_preds = kwargs['prev_bbox_preds'][mask]
 
-            prev_preds = kwargs['prev_bbox_preds'][mask]
+                vel = prev_preds[:, -2:]
+                moved_coords = prev_preds[:, :2] + vel * 0.5
 
-            vel = prev_preds[:, -2:]
-            moved_coords = prev_preds[:, :2] + vel * 0.5
+                rotation_angle = img_meta['can_bus'][-1] * (np.pi / 180)
+                rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=prev_preds.device, dtype=torch.float32)
+                rotated_coords = moved_coords @ rotation_matrix.T
 
-            rotation_angle = img_meta['can_bus'][-1] * (np.pi / 180)
-            rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=prev_preds.device, dtype=torch.float32)
-            rotated_coords = moved_coords @ rotation_matrix.T
-
-            shifted_coords = rotated_coords - shift * 200 * 0.512
-
-            save = dict()
-            save['current_gt'] = kwargs['gt_bboxes_3d'][0][0].tensor.cpu()
-            save['previous_preds'] = shifted_coords.cpu()
-
-            torch.save(save, "./vis/save.pt")
-            breakpoint()
+                shifted_coords = rotated_coords - shift * 200 * 0.512
 
         # integrate can_bus info into bev_query
         can_bus = torch.tensor([img_meta['can_bus']], device=bev_query.device, dtype=bev_query.dtype) # (1, 18)
@@ -174,7 +167,7 @@ class PerceptionTransformer(BaseModule):
         else:
             stacked_bev = prev_bev # None
             
-        return shift, bev_query, feats_flatten, spatial_shapes, level_start_index, stacked_bev
+        return shift, bev_query, feats_flatten, spatial_shapes, level_start_index, stacked_bev, shifted_coords
 
     @auto_fp16(apply_to=('mlvl_feats', 'bev_query', 'bev_pos', 'prev_bev'))
     def get_bev_features(self,
@@ -188,15 +181,15 @@ class PerceptionTransformer(BaseModule):
                          img_meta,
                          **kwargs):
 
-        shift, bev_query, feats_flatten, spatial_shapes, level_start_index, stacked_bev = self.preprocess_for_encoder(mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
-                                                                                                                      bev_query, # (1, 200*200, 256)
-                                                                                                                      bev_pos, # (1, 200*200, 256)
-                                                                                                                      prev_bev, # (1, 200*200, 256)
-                                                                                                                      bev_h, # 200
-                                                                                                                      bev_w, # 200
-                                                                                                                      grid_length, # [0.512, 0.512]
-                                                                                                                      img_meta,
-                                                                                                                      **kwargs)
+        shift, bev_query, feats_flatten, spatial_shapes, level_start_index, stacked_bev, prev_preds = self.preprocess_for_encoder(mlvl_feats, # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
+                                                                                                                                  bev_query, # (1, 200*200, 256)
+                                                                                                                                  bev_pos, # (1, 200*200, 256)
+                                                                                                                                  prev_bev, # (1, 200*200, 256)
+                                                                                                                                  bev_h, # 200
+                                                                                                                                  bev_w, # 200
+                                                                                                                                  grid_length, # [0.512, 0.512]
+                                                                                                                                  img_meta,
+                                                                                                                                  **kwargs)
 
         bev_query = self.encoder(bev_query=bev_query, # (1, 200*200, 256)
                                  value=feats_flatten, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
@@ -208,6 +201,7 @@ class PerceptionTransformer(BaseModule):
                                  level_start_index=level_start_index, # [0, 23200, 29000, 30450]
                                  shift=shift,
                                  img_meta=img_meta,
+                                 prev_preds=prev_preds,
                                  **kwargs)
 
         return bev_query
@@ -252,5 +246,14 @@ class PerceptionTransformer(BaseModule):
                                                        pc_range=pc_range,
                                                        spatial_shapes=torch.tensor([[bev_h, bev_w]], device=object_query.device), # [[200, 200]]
                                                        level_start_index=torch.tensor([0], device=object_query.device)) # [0]
+
+        bbox_preds = outputs_bboxes[0, 0]
+        cls_scores = outputs_classes[0, 0]
+        cls_scores = cls_scores.max(1).values.sigmoid()
+        bbox_preds = bbox_preds[cls_scores > 0.01].to('cpu')
+        cls_scores = cls_scores[cls_scores > 0.01].to('cpu')
+
+        kwargs['output_logger']['bbox_preds'].append(bbox_preds)
+        kwargs['output_logger']['cls_scores'].append(cls_scores)
 
         return bev_query, outputs_classes, outputs_bboxes
