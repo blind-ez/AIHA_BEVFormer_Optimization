@@ -14,12 +14,12 @@ def load_data():
     save = torch.load(directory_path + "save.pt")
 
     current_gt = save['current_gt']
-    previous_gt = save['previous_gt']
-    
-    return current_gt, previous_gt
+    previous_preds = save['previous_preds']
 
-def visualize_previous_gt(previous_gt):
-    norm_coords = (previous_gt[:, :2] - roi[0]) / (roi[1] - roi[0])
+    return current_gt, previous_preds
+
+def visualize_previous_preds(previous_preds):
+    norm_coords = (previous_preds[:, :2] - roi[0]) / (roi[1] - roi[0])
     bev_coords = (norm_coords * bev_size).to(torch.long)
 
     spots = torch.zeros(size=(200, 200), dtype=torch.long)
@@ -49,7 +49,7 @@ def draw_a_bbox(bbox):
 
 
 ##################################################
-current_gt, previous_gt = load_data()
+current_gt, previous_preds = load_data()
 
 plt.figure(figsize=(10, 10))
 plt.xlim(0, bev_size)
@@ -58,7 +58,7 @@ plt.ylim(0, bev_size)
 for bbox in current_gt:
     draw_a_bbox(bbox)
 
-visualize_previous_gt(previous_gt)
+visualize_previous_preds(previous_preds)
 
 plt.savefig(directory_path + "result.png", dpi=200, bbox_inches='tight', pad_inches=0)
 plt.close()

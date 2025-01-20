@@ -188,8 +188,12 @@ class BEVFormer(MVXTwoStageDetector):
     def forward_test(self, img_metas, img, **kwargs):
         if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
             self.prev_frame_info['prev_bev'] = None
-            kwargs['prev_gt_bboxes_3d'] = None
+            self.prev_frame_info['prev_cls_scores'] = None
+            self.prev_frame_info['prev_bbox_preds'] = None
         self.prev_frame_info['scene_token'] = img_metas[0][0]['scene_token']
+
+        kwargs['prev_cls_scores'] = self.prev_frame_info['prev_cls_scores']
+        kwargs['prev_bbox_preds'] = self.prev_frame_info['prev_bbox_preds']
 
         tmp_pos = copy.deepcopy(img_metas[0][0]['can_bus'][:3])
         tmp_angle = copy.deepcopy(img_metas[0][0]['can_bus'][-1])
@@ -201,31 +205,30 @@ class BEVFormer(MVXTwoStageDetector):
             img_metas[0][0]['can_bus'][:3] -= self.prev_frame_info['prev_pos']
             img_metas[0][0]['can_bus'][-1] -= self.prev_frame_info['prev_angle']
 
-        new_prev_bev, bbox_result = self.simple_test(img_meta=img_metas[0][0],
-                                                     img=img[0], # (1, 6, 3, 928, 1600)
-                                                     prev_bev=self.prev_frame_info['prev_bev'], # (1, 200*200, 256)
-                                                     **kwargs)
+        outs, bbox_result = self.simple_test(img_meta=img_metas[0][0],
+                                             img=img[0], # (1, 6, 3, 928, 1600)
+                                             prev_bev=self.prev_frame_info['prev_bev'], # (1, 200*200, 256)
+                                             **kwargs)
 
         self.prev_frame_info['prev_pos'] = tmp_pos
         self.prev_frame_info['prev_angle'] = tmp_angle
-        self.prev_frame_info['prev_bev'] = new_prev_bev
+        self.prev_frame_info['prev_bev'] = outs['bev_query']
 
-        kwargs['prev_gt_bboxes_3d'] = kwargs['gt_bboxes_3d'][0][0].tensor
+        self.prev_frame_info['prev_cls_scores'] = outs['all_cls_scores'][0, 0]
+        self.prev_frame_info['prev_bbox_preds'] = outs['all_bbox_preds'][0, 0]
 
         # print('\n\n')
         # print(bbox_result[0]['pts_bbox']['scores_3d'])
         # print('\n')
         # breakpoint()
-        return bbox_result, kwargs['prev_gt_bboxes_3d']
+        return bbox_result
 
     def simple_test(self, img_meta, img, prev_bev, rescale=False, **kwargs):
         mlvl_feats = self.extract_feat(img=img) # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
 
         outs = self.pts_bbox_head(mlvl_feats=mlvl_feats, prev_bev=prev_bev, img_meta=img_meta, **kwargs)
 
-        new_prev_bev = outs['bev_query']
-
         bboxes, scores, labels = self.pts_bbox_head.get_bboxes(preds_dicts=outs, img_meta=img_meta, rescale=rescale)
         bbox_result = [{'pts_bbox': bbox3d2result(bboxes, scores, labels)}]
 
-        return new_prev_bev, bbox_result
+        return outs, bbox_result

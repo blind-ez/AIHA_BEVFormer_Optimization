@@ -115,22 +115,26 @@ class PerceptionTransformer(BaseModule):
         shift_y = translation_length * np.cos(bev_angle * (np.pi / 180)) / grid_length_y / bev_h
         shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
 
-        # align previous bboxes
-        if kwargs['prev_gt_bboxes_3d'] is not None:
-            device = kwargs['prev_gt_bboxes_3d'].device
+        # align previous predictions
+        if prev_bev is not None:
+            prev_scores, _ = kwargs['prev_cls_scores'].max(1)
+            prev_scores = prev_scores.sigmoid()
+            mask = prev_scores > 0.05
 
-            vel = kwargs['prev_gt_bboxes_3d'][:, -2:]
-            moved_coords = kwargs['prev_gt_bboxes_3d'][:, :2] + vel * 0.5
+            prev_preds = kwargs['prev_bbox_preds'][mask]
+
+            vel = prev_preds[:, -2:]
+            moved_coords = prev_preds[:, :2] + vel * 0.5
 
             rotation_angle = img_meta['can_bus'][-1] * (np.pi / 180)
-            rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=device, dtype=torch.float32)
+            rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=prev_preds.device, dtype=torch.float32)
             rotated_coords = moved_coords @ rotation_matrix.T
 
             shifted_coords = rotated_coords - shift * 200 * 0.512
 
             save = dict()
             save['current_gt'] = kwargs['gt_bboxes_3d'][0][0].tensor.cpu()
-            save['previous_gt'] = shifted_coords.cpu()
+            save['previous_preds'] = shifted_coords.cpu()
 
             torch.save(save, "./vis/save.pt")
             breakpoint()
