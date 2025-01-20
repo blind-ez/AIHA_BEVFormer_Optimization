@@ -99,7 +99,8 @@ class PerceptionTransformer(BaseModule):
                                bev_h, # 200
                                bev_w, # 200
                                grid_length, # [0.512, 0.512]
-                               img_meta):
+                               img_meta,
+                               **kwargs):
 
         # get shift
         delta_x = np.array([img_meta['can_bus'][0]])
@@ -113,6 +114,23 @@ class PerceptionTransformer(BaseModule):
         shift_x = translation_length * np.sin(bev_angle * (np.pi / 180)) / grid_length_x / bev_w
         shift_y = translation_length * np.cos(bev_angle * (np.pi / 180)) / grid_length_y / bev_h
         shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
+
+        # align previous bboxes
+        if kwargs['prev_gt_bboxes_3d'] is not None:
+            device = kwargs['prev_gt_bboxes_3d'].device
+
+            rotation_angle = img_meta['can_bus'][-1] * (np.pi / 180)
+            rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=device, dtype=torch.float32)
+            rotated_coords = kwargs['prev_gt_bboxes_3d'][:, :2] @ rotation_matrix.T
+
+            shifted_coords = rotated_coords - shift * 200 * 0.512
+
+            save = dict()
+            save['current_gt'] = kwargs['gt_bboxes_3d'][0][0].tensor.cpu()
+            save['previous_gt'] = shifted_coords.cpu()
+
+            torch.save(save, "./vis/save.pt")
+            breakpoint()
 
         # integrate can_bus info into bev_query
         can_bus = torch.tensor([img_meta['can_bus']], device=bev_query.device, dtype=bev_query.dtype) # (1, 18)
@@ -170,7 +188,8 @@ class PerceptionTransformer(BaseModule):
                                                                                                                       bev_h, # 200
                                                                                                                       bev_w, # 200
                                                                                                                       grid_length, # [0.512, 0.512]
-                                                                                                                      img_meta)
+                                                                                                                      img_meta,
+                                                                                                                      **kwargs)
 
         bev_query = self.encoder(bev_query=bev_query, # (1, 200*200, 256)
                                  value=feats_flatten, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)

@@ -188,6 +188,7 @@ class BEVFormer(MVXTwoStageDetector):
     def forward_test(self, img_metas, img, **kwargs):
         if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
             self.prev_frame_info['prev_bev'] = None
+            kwargs['prev_gt_bboxes_3d'] = None
         self.prev_frame_info['scene_token'] = img_metas[0][0]['scene_token']
 
         tmp_pos = copy.deepcopy(img_metas[0][0]['can_bus'][:3])
@@ -209,11 +210,13 @@ class BEVFormer(MVXTwoStageDetector):
         self.prev_frame_info['prev_angle'] = tmp_angle
         self.prev_frame_info['prev_bev'] = new_prev_bev
 
+        kwargs['prev_gt_bboxes_3d'] = kwargs['gt_bboxes_3d'][0][0].tensor
+
         # print('\n\n')
         # print(bbox_result[0]['pts_bbox']['scores_3d'])
         # print('\n')
         # breakpoint()
-        return bbox_result
+        return bbox_result, kwargs['prev_gt_bboxes_3d']
 
     def simple_test(self, img_meta, img, prev_bev, rescale=False, **kwargs):
         mlvl_feats = self.extract_feat(img=img) # (1, 6, 256, H/8, W/8), (1, 6, 256, H/16, W/16), (1, 6, 256, H/32, W/32), (1, 6, 256, H/64, W/64)
