@@ -129,7 +129,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
                                                                                           device=bev_query.device,
                                                                                           dtype=bev_query.dtype) # (2, 200*200, 1, 2), (1, 4, 200*200, 3), (6, 1, 200*200, 4)
 
-        if kwargs['prev_preds'] is not None:
+        if kwargs['sample_idx'] % 2 == 0 and kwargs['prev_preds'] is not None:
             n = 25
             bev_size = bev_h
 
@@ -148,7 +148,10 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
             occ_mask = (valid_coords[:, 1] * bev_size) + valid_coords[:, 0]
             kwargs['occ_mask'] = occ_mask
+        else:
+            kwargs['occ_mask'] = None
 
+        if kwargs['sample_idx'] % 2 == 0 and kwargs['prev_preds'] is not None:
             kwargs['mask_logger'].append(valid_coords.to('cpu'))
         else:
             kwargs['mask_logger'].append(None)
@@ -204,7 +207,7 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 ref_2d_hybrid, # (2, 200*200, 1, 2)
                 ref_3d_projected_to_each_cam, # (6, 1, 200*200, 4, 2)
                 cam_mask, # (6, 1, 200*200, 4)
-                occ_mask=None,
+                occ_mask,
                 **kwargs):
 
         norm_index = 0

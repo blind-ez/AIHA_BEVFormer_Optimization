@@ -188,12 +188,20 @@ class BEVFormer(MVXTwoStageDetector):
     def forward_test(self, img_metas, img, **kwargs):
         if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
             self.prev_frame_info['prev_bev'] = None
+
+        if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
             self.prev_frame_info['prev_cls_scores'] = None
             self.prev_frame_info['prev_bbox_preds'] = None
+
+        if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
+            self.prev_frame_info['sample_idx'] = 0
+        self.prev_frame_info['sample_idx'] += 1
+
         self.prev_frame_info['scene_token'] = img_metas[0][0]['scene_token']
 
         kwargs['prev_cls_scores'] = self.prev_frame_info['prev_cls_scores']
         kwargs['prev_bbox_preds'] = self.prev_frame_info['prev_bbox_preds']
+        kwargs['sample_idx'] = self.prev_frame_info['sample_idx']
 
         tmp_pos = copy.deepcopy(img_metas[0][0]['can_bus'][:3])
         tmp_angle = copy.deepcopy(img_metas[0][0]['can_bus'][-1])
@@ -214,13 +222,15 @@ class BEVFormer(MVXTwoStageDetector):
         self.prev_frame_info['prev_angle'] = tmp_angle
         self.prev_frame_info['prev_bev'] = outs['bev_query']
 
-        self.prev_frame_info['prev_cls_scores'] = outs['all_cls_scores'][0, 0]
-        self.prev_frame_info['prev_bbox_preds'] = outs['all_bbox_preds'][0, 0]
+        self.prev_frame_info['prev_cls_scores'] = outs['all_cls_scores'][-1, 0]
+        self.prev_frame_info['prev_bbox_preds'] = outs['all_bbox_preds'][-1, 0]
 
         # print('\n\n')
         # print(bbox_result[0]['pts_bbox']['scores_3d'])
         # print('\n')
         # breakpoint()
+
+        # return bbox_result
         return bbox_result, kwargs['output_logger'], kwargs['mask_logger']
 
     def simple_test(self, img_meta, img, prev_bev, rescale=False, **kwargs):

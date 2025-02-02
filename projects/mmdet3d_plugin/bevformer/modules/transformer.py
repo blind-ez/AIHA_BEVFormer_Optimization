@@ -116,10 +116,10 @@ class PerceptionTransformer(BaseModule):
         shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
 
         # align previous predictions
-        shifted_coords = None
+        score_threshold = 0.1
         if prev_bev is not None:
             prev_scores = kwargs['prev_cls_scores'].max(1).values.sigmoid()
-            mask = prev_scores > 0.33
+            mask = prev_scores > score_threshold
             if mask.sum() != 0:
                 prev_preds = kwargs['prev_bbox_preds'][mask]
 
@@ -131,6 +131,10 @@ class PerceptionTransformer(BaseModule):
                 rotated_coords = moved_coords @ rotation_matrix.T
 
                 shifted_coords = rotated_coords - shift * 200 * 0.512
+            else:
+                shifted_coords = None
+        else:
+            shifted_coords = None
 
         # integrate can_bus info into bev_query
         can_bus = torch.tensor([img_meta['can_bus']], device=bev_query.device, dtype=bev_query.dtype) # (1, 18)
@@ -247,9 +251,10 @@ class PerceptionTransformer(BaseModule):
                                                        spatial_shapes=torch.tensor([[bev_h, bev_w]], device=object_query.device), # [[200, 200]]
                                                        level_start_index=torch.tensor([0], device=object_query.device)) # [0]
 
-        bbox_preds = outputs_bboxes[0, 0]
-        cls_scores = outputs_classes[0, 0]
+        bbox_preds = outputs_bboxes[-1, 0]
+        cls_scores = outputs_classes[-1, 0]
         cls_scores = cls_scores.max(1).values.sigmoid()
+
         bbox_preds = bbox_preds[cls_scores > 0.01].to('cpu')
         cls_scores = cls_scores[cls_scores > 0.01].to('cpu')
 
