@@ -102,9 +102,13 @@ class TemporalSelfAttention(BaseModule):
                 spatial_shapes, # [[200, 200]]
                 level_start_index, # [0]
                 ref_2d_hybrid, # (2, 200*200, 1, 2)
-                occ_mask):
+                occ_mask,
+                **kwargs):
 
         if occ_mask is not None:
+            if kwargs['log']:
+                kwargs['sample_logger']['num_queries']['self_attn'] = len(occ_mask)
+
             _, num_bev_cells, _ = query.shape # 200*200
             num_activated_queries = len(occ_mask)
 
@@ -131,8 +135,36 @@ class TemporalSelfAttention(BaseModule):
             attention_weights = attention_weights.permute(0, 3, 1, 2, 4, 5).reshape(2, num_activated_queries, self.num_heads, 1, self.num_points).contiguous() # (2, num_activated_queries, 8, 1, 4)
             attention_weights = attention_weights.softmax(-1) # (2, num_activated_queries, 8, 1, 4)
 
-            value = self.value_proj(value) # (2, 200*200, 256)
-            value = value.reshape(2, num_bev_cells, self.num_heads, -1) # (2, 200*200, 8, 32)
+            if kwargs['prune_values']:
+                list1 = []
+                list2 = []
+                for lvl in range(2):
+                    tmp = sampling_locations[lvl].reshape(-1, 2)
+                    tmp_mask = ((tmp>0.0) & (tmp<1.0)).all(-1)
+                    tmp = tmp[tmp_mask]
+                    tmp = (tmp * (200-1)).to(torch.int64)
+                    tmp = torch.unique(tmp, dim=0)
+                    offsets = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], device=tmp.device)
+                    tmp = tmp[:, None, :] + offsets[None, :, :]
+                    tmp = torch.unique(tmp.view(-1, 2), dim=0)
+                    tmp_flattened = (tmp[:, 1] * 200) + tmp[:, 0]
+                    lvl_index = torch.zeros_like(tmp_flattened) + lvl
+                    list1.append(tmp_flattened)
+                    list2.append(lvl_index)
+                aa = torch.cat(list1)
+                bb = torch.cat(list2)
+
+                valid_value = self.value_proj(value[bb, aa, :])
+                if kwargs['log']:
+                    kwargs['sample_logger']['num_values']['self_attn'].append(len(aa))
+                value_buffer = torch.zeros_like(value) # (2, 200*200, 256)
+                value_buffer[bb, aa, :] = valid_value
+                value = value_buffer.reshape(2, num_bev_cells, self.num_heads, -1) # (2, 200*200, 8, 32)
+            else:
+                value = self.value_proj(value) # (2, 200*200, 256)
+                if kwargs['log']:
+                    kwargs['sample_logger']['num_values']['self_attn'].append(2*40000)
+                value = value.reshape(2, num_bev_cells, self.num_heads, -1) # (2, 200*200, 8, 32)
 
             MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
             output = MultiScaleDeformableAttnFunction.apply(value, # (2, 200*200, 8, 32)
@@ -150,7 +182,10 @@ class TemporalSelfAttention(BaseModule):
             return self.dropout(output) + identity
 
         else:
-            _, num_bev_cell, _ = query.shape # 200*200
+            if kwargs['log']:
+                kwargs['sample_logger']['num_queries']['self_attn'] = 40000
+
+            _, num_bev_cells, _ = query.shape # 200*200
 
             identity = query # (1, 200*200, 256)
 
@@ -161,19 +196,21 @@ class TemporalSelfAttention(BaseModule):
             query = torch.cat([value[:1], query], -1) # (1, 200*200, 256+256)
 
             sampling_offsets = self.sampling_offsets(query) # (1, 200*200, 128)
-            sampling_offsets = sampling_offsets.view(1, num_bev_cell, self.num_heads, 2, 1, self.num_points, 2) # (1, 200*200, 8, 2, 1, 4, 2)
-            sampling_offsets = sampling_offsets.permute(0, 3, 1, 2, 4, 5, 6).reshape(2, num_bev_cell, self.num_heads, 1, self.num_points, 2) # (2, 200*200, 8, 1, 4, 2)
+            sampling_offsets = sampling_offsets.view(1, num_bev_cells, self.num_heads, 2, 1, self.num_points, 2) # (1, 200*200, 8, 2, 1, 4, 2)
+            sampling_offsets = sampling_offsets.permute(0, 3, 1, 2, 4, 5, 6).reshape(2, num_bev_cells, self.num_heads, 1, self.num_points, 2) # (2, 200*200, 8, 1, 4, 2)
             offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1) # [[200, 200]]
             sampling_offsets = sampling_offsets / offset_normalizer[None, None, None, :, None, :] # (2, 200*200, 8, 1, 4, 2)
             sampling_locations = ref_2d_hybrid[:, :, None, :, None, :] + sampling_offsets # (2, 200*200, 8, 1, 4, 2)
 
             attention_weights = self.attention_weights(query) # (1, 200*200, 64)
-            attention_weights = attention_weights.view(1, num_bev_cell, self.num_heads, 2, 1, self.num_points) # (1, 200*200, 8, 2, 1, 4)
-            attention_weights = attention_weights.permute(0, 3, 1, 2, 4, 5).reshape(2, num_bev_cell, self.num_heads, 1, self.num_points).contiguous() # (2, 200*200, 8, 1, 4)
+            attention_weights = attention_weights.view(1, num_bev_cells, self.num_heads, 2, 1, self.num_points) # (1, 200*200, 8, 2, 1, 4)
+            attention_weights = attention_weights.permute(0, 3, 1, 2, 4, 5).reshape(2, num_bev_cells, self.num_heads, 1, self.num_points).contiguous() # (2, 200*200, 8, 1, 4)
             attention_weights = attention_weights.softmax(-1) # (2, 200*200, 8, 1, 4)
 
             value = self.value_proj(value) # (2, 200*200, 256)
-            value = value.reshape(2, num_bev_cell, self.num_heads, -1) # (2, 200*200, 8, 32)
+            if kwargs['log']:
+                kwargs['sample_logger']['num_values']['self_attn'].append(2*40000)
+            value = value.reshape(2, num_bev_cells, self.num_heads, -1) # (2, 200*200, 8, 32)
 
             MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
             output = MultiScaleDeformableAttnFunction.apply(value, # (2, 200*200, 8, 32)

@@ -63,7 +63,8 @@ class SpatialCrossAttention(BaseModule):
                 level_start_index, # [0, 23200, 29000, 30450]
                 ref_3d_projected_to_each_cam, # (6, 1, 200*200, 4, 2)
                 cam_mask, # (6, 1, 200*200, 4)
-                occ_mask):
+                occ_mask,
+                **kwargs):
 
         if occ_mask is not None:
             _, _, _, num_points_in_pillar, _ = ref_3d_projected_to_each_cam.shape # 4
@@ -79,6 +80,9 @@ class SpatialCrossAttention(BaseModule):
                 indices.append(valid_gt_index_per_cam)
             max_num = max([each.numel() for each in indices])
 
+            if kwargs['log']:
+                kwargs['sample_logger']['num_queries']['cross_attn'] = max_num
+
             # each camera only interacts with its corresponding BEV queries
             # this step can greatly save GPU memory
             query_rebatch = query.new_zeros([6, max_num, self.embed_dims]) # (6, max_num, 256)
@@ -93,7 +97,8 @@ class SpatialCrossAttention(BaseModule):
                                                value=value, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
                                                ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam_rebatch, # (6, max_num, 4, 2)
                                                spatial_shapes=spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
-                                               level_start_index=level_start_index) # [0, 23200, 29000, 30450]
+                                               level_start_index=level_start_index, # [0, 23200, 29000, 30450]
+                                               **kwargs)
 
             # assign attention results for each camera
             slots = torch.zeros_like(query) # (1, num_activated_queries, 256)
@@ -122,6 +127,9 @@ class SpatialCrossAttention(BaseModule):
                 indices.append(valid_cell_index_per_cam)
             max_num = max([len(each) for each in indices])
 
+            if kwargs['log']:
+                kwargs['sample_logger']['num_queries']['cross_attn'] = max_num
+
             # each camera only interacts with its corresponding BEV queries
             # this step can greatly save GPU memory
             query_rebatch = query.new_zeros([6, max_num, self.embed_dims]) # (6, max_num, 256)
@@ -135,7 +143,8 @@ class SpatialCrossAttention(BaseModule):
                                                value=value, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
                                                ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam_rebatch, # (6, max_num, 4, 2)
                                                spatial_shapes=spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
-                                               level_start_index=level_start_index) # [0, 23200, 29000, 30450]
+                                               level_start_index=level_start_index, # [0, 23200, 29000, 30450]
+                                               **kwargs)
 
             # assign attention results for each camera
             slots = torch.zeros_like(query) # (1, 200*200, 256)
@@ -229,7 +238,8 @@ class MSDeformableAttention3D(BaseModule):
                 value, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
                 ref_3d_projected_to_each_cam, # (6, max_num, 4, 2)
                 spatial_shapes, # [[116, 200], [58, 100], [29, 50], [15, 25]]
-                level_start_index): # [0, 23200, 29000, 30450]
+                level_start_index, # [0, 23200, 29000, 30450]
+                **kwargs):
 
         _, num_query, num_points_in_pillar, _ = ref_3d_projected_to_each_cam.shape # max_num, 4
 
@@ -245,9 +255,40 @@ class MSDeformableAttention3D(BaseModule):
         attention_weights = attention_weights.softmax(-1) # (6, max_num, 8, 32)
         attention_weights = attention_weights.view(6, num_query, self.num_heads, self.num_levels, self.num_points) # (6, max_num, 8, 4, 8)
 
-        _, num_value, _ = value.shape # (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64)
-        value = self.value_proj(value) # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
-        value = value.view(6, num_value, self.num_heads, -1) # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 8, 32)
+        if kwargs['prune_values']:
+            list1 = []
+            list2 = []
+            for view in range(6):
+                for scale in range(4):
+                    tmp = sampling_locations[view, :, :, scale, :, :].reshape(-1, 2)
+                    tmp_mask = ((tmp>0.0) & (tmp<1.0)).all(-1)
+                    tmp = tmp[tmp_mask]
+                    tmp_spatial_shape = torch.tensor((spatial_shapes[scale][1], spatial_shapes[scale][0]), device=tmp.device)
+                    tmp = (tmp * (tmp_spatial_shape-1)).to(torch.int64)
+                    tmp = torch.unique(tmp, dim=0)
+                    offsets = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], device=tmp.device)
+                    tmp = tmp[:, None, :] + offsets[None, :, :]
+                    tmp = torch.unique(tmp.view(-1, 2), dim=0)
+                    tmp_flattened = (tmp[:, 1] * tmp_spatial_shape[0]) + tmp[:, 0] + level_start_index[scale]
+                    view_index = torch.zeros_like(tmp_flattened) + view
+                    list1.append(tmp_flattened)
+                    list2.append(view_index)
+            aa = torch.cat(list1)
+            bb = torch.cat(list2)
+
+            _, num_value, _ = value.shape
+            valid_value = self.value_proj(value[bb, aa, :])
+            if kwargs['log']:
+                kwargs['sample_logger']['num_values']['cross_attn'].append(len(aa))
+            value_buffer = torch.zeros_like(value)
+            value_buffer[bb, aa, :] = valid_value
+            value = value_buffer.view(6, num_value, self.num_heads, -1)
+        else:
+            _, num_value, _ = value.shape # (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64)
+            value = self.value_proj(value) # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 256)
+            if kwargs['log']:
+                kwargs['sample_logger']['num_values']['cross_attn'].append(6*30825)
+            value = value.view(6, num_value, self.num_heads, -1) # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 8, 32)
 
         MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
         output = MultiScaleDeformableAttnFunction.apply(value, # (6, (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64), 8, 32)

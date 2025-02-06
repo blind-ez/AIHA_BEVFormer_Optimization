@@ -129,32 +129,73 @@ class BEVFormerEncoder(TransformerLayerSequence):
                                                                                           device=bev_query.device,
                                                                                           dtype=bev_query.dtype) # (2, 200*200, 1, 2), (1, 4, 200*200, 3), (6, 1, 200*200, 4)
 
-        if kwargs['sample_idx'] % 2 == 0 and kwargs['prev_preds'] is not None:
-            n = 25
-            bev_size = bev_h
+        if kwargs['apply_occ_mask']:
+            if kwargs['select_queries_around_boundary']:
+                front_width = kwargs['front_width']
+                other_width = kwargs['other_width']
 
-            prev_preds = kwargs['prev_preds']
-            normalized_coords = (prev_preds - (-51.2)) / 102.4
-            bev_coords = (normalized_coords * bev_size).to(torch.long)
+                if other_width == 0:
+                    forward_boundary_xs = torch.arange(200)[None, :].repeat(front_width, 1).to(bev_query.device)
+                    forward_boundary_ys = torch.arange(200-front_width, 200)[:, None].repeat(1, 200).to(bev_query.device)
+                    forward_boundary_coords = torch.stack([forward_boundary_xs, forward_boundary_ys], dim=-1).view(-1, 2)
+
+                    boundary_coords = forward_boundary_coords
+
+                else:
+                    forward_boundary_xs = torch.arange(200)[None, :].repeat(front_width, 1).to(bev_query.device)
+                    forward_boundary_ys = torch.arange(200-front_width, 200)[:, None].repeat(1, 200).to(bev_query.device)
+                    forward_boundary_coords = torch.stack([forward_boundary_xs, forward_boundary_ys], dim=-1).view(-1, 2)
+
+                    backward_boundary_xs = torch.arange(200)[None, :].repeat(other_width, 1).to(bev_query.device)
+                    backward_boundary_ys = torch.arange(other_width)[:, None].repeat(1, 200).to(bev_query.device)
+                    backward_boundary_coords = torch.stack([backward_boundary_xs, backward_boundary_ys], dim=-1).view(-1, 2)
+
+                    left_boundary_xs = torch.arange(other_width)[None, :].repeat(200, 1).to(bev_query.device)
+                    left_boundary_ys = torch.arange(200)[:, None].repeat(1, other_width).to(bev_query.device)
+                    left_boundary_coords = torch.stack([left_boundary_xs, left_boundary_ys], dim=-1).view(-1, 2)
+
+                    right_boundary_xs = torch.arange(200-other_width, 200)[None, :].repeat(200, 1).to(bev_query.device)
+                    right_boundary_ys = torch.arange(200)[:, None].repeat(1, other_width).to(bev_query.device)
+                    right_boundary_coords = torch.stack([right_boundary_xs, right_boundary_ys], dim=-1).view(-1, 2)
+
+                    boundary_coords = torch.cat([forward_boundary_coords, backward_boundary_coords, left_boundary_coords, right_boundary_coords], dim=0)
+
+            n = kwargs['n']
+            occ_reference_coords = kwargs['occ_reference_coords'][0]
+
+            occ_reference_coords = (occ_reference_coords - (-51.2)) / 102.4
+            occ_reference_coords = (occ_reference_coords * 200).to(torch.long)
 
             xs = (torch.arange(n)-(n//2))[:, None].repeat(1, n).to(bev_query.device)
             ys = (torch.arange(n)-(n//2))[None, :].repeat(n, 1).to(bev_query.device)
-            offsets = torch.stack((xs, ys), dim=2).view(-1, 2)[None, :, :]
+            offsets = torch.stack((xs, ys), dim=2).view(-1, 2)
 
-            expanded_coords = bev_coords[:, None, :] + offsets
-            unique_coords = torch.unique(expanded_coords.view(-1, 2), dim=0)
-            valid_mask = ((unique_coords < bev_size) & (unique_coords >= 0)).all(1)
-            valid_coords = unique_coords[valid_mask]
+            occ_mask = occ_reference_coords[:, None, :] + offsets[None, :, :]
+            occ_mask = occ_mask.view(-1, 2)
+            valid_mask = ((occ_mask < 200) & (occ_mask >= 0)).all(1)
+            occ_mask = occ_mask[valid_mask]
 
-            occ_mask = (valid_coords[:, 1] * bev_size) + valid_coords[:, 0]
-            kwargs['occ_mask'] = occ_mask
+            if kwargs['select_queries_around_boundary']:
+                occ_mask = torch.cat([occ_mask, boundary_coords], dim=0)
+            occ_mask = torch.unique(occ_mask, dim=0)
+
+            occ_mask_flattened = (occ_mask[:, 1] * 200) + occ_mask[:, 0]
+            kwargs['occ_mask'] = occ_mask_flattened
         else:
             kwargs['occ_mask'] = None
 
-        if kwargs['sample_idx'] % 2 == 0 and kwargs['prev_preds'] is not None:
-            kwargs['mask_logger'].append(valid_coords.to('cpu'))
-        else:
-            kwargs['mask_logger'].append(None)
+        if kwargs['restrict_prev_preds']:
+            kwargs['current_occ_mask'].clear()
+            kwargs['current_occ_mask'].append(kwargs['occ_mask'])
+
+        if kwargs['log']:
+            if kwargs['apply_occ_mask']:
+                kwargs['logger']['mask'].append(occ_mask)
+            else:
+                kwargs['logger']['mask'].append(None)
+
+        if kwargs['log']:
+            kwargs['sample_logger'] = dict(num_queries=dict(self_attn=0, cross_attn=0), num_values=dict(self_attn=[], cross_attn=[]))
 
         for lid, layer in enumerate(self.layers):
             bev_query = layer(query=bev_query, # (1, 200*200, 256)
@@ -166,6 +207,12 @@ class BEVFormerEncoder(TransformerLayerSequence):
                               ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam, # (6, 1, 200*200, 4, 2)
                               cam_mask=cam_mask, # (6, 1, 200*200, 4)
                               **kwargs)
+
+        if kwargs['log']:
+            kwargs['logger']['num_queries']['self_attn'].append(kwargs['sample_logger']['num_queries']['self_attn'])
+            kwargs['logger']['num_queries']['cross_attn'].append(kwargs['sample_logger']['num_queries']['cross_attn'])
+            kwargs['logger']['num_values']['self_attn'].append(int(sum(kwargs['sample_logger']['num_values']['self_attn'])/len(kwargs['sample_logger']['num_values']['self_attn'])))
+            kwargs['logger']['num_values']['cross_attn'].append(int(sum(kwargs['sample_logger']['num_values']['cross_attn'])/len(kwargs['sample_logger']['num_values']['cross_attn'])))
 
         return bev_query
 
@@ -222,7 +269,8 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                                                     spatial_shapes=torch.tensor([[bev_h, bev_w]], device=query.device), # [[200, 200]]
                                                     level_start_index=torch.tensor([0], device=query.device), # [0]
                                                     ref_2d_hybrid=ref_2d_hybrid, # (2, 200*200, 1, 2)
-                                                    occ_mask=occ_mask)
+                                                    occ_mask=occ_mask,
+                                                    **kwargs)
                 attn_index += 1
 
             elif layer == 'norm':
@@ -236,7 +284,8 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                                                     level_start_index=level_start_index, # [0, 23200, 29000, 30450]
                                                     ref_3d_projected_to_each_cam=ref_3d_projected_to_each_cam, # (6, 1, 200*200, 4, 2)
                                                     cam_mask=cam_mask, # (6, 1, 200*200, 4)
-                                                    occ_mask=occ_mask)
+                                                    occ_mask=occ_mask,
+                                                    **kwargs)
                 attn_index += 1
 
             elif layer == 'ffn':
