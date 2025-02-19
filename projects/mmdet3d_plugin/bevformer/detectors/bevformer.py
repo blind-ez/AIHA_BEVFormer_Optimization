@@ -190,24 +190,41 @@ class BEVFormer(MVXTwoStageDetector):
             self.prev_frame_info['prev_bev'] = None
             if kwargs['select_queries_based_on_prev_preds']:
                 self.prev_frame_info['prev_bbox_preds'] = None
-
-        if kwargs['select_queries_based_on_prev_preds'] and kwargs['alternate']:
-            if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
-                self.prev_frame_info['sample_idx'] = 0
-            if img_metas[0][0]['scene_token'] == self.prev_frame_info['scene_token']:
-                self.prev_frame_info['sample_idx'] += 1
+            self.prev_frame_info['sample_idx'] = 0
+        else:
+            self.prev_frame_info['sample_idx'] += 1
 
         self.prev_frame_info['scene_token'] = img_metas[0][0]['scene_token']
 
         tmp_pos = copy.deepcopy(img_metas[0][0]['can_bus'][:3])
         tmp_angle = copy.deepcopy(img_metas[0][0]['can_bus'][-1])
 
-        if self.prev_frame_info['prev_bev'] is None:
+        if self.prev_frame_info['sample_idx'] == 0:
             img_metas[0][0]['can_bus'][:3] = 0
             img_metas[0][0]['can_bus'][-1] = 0
         else:
             img_metas[0][0]['can_bus'][:3] -= self.prev_frame_info['prev_pos']
             img_metas[0][0]['can_bus'][-1] -= self.prev_frame_info['prev_angle']
+
+        if kwargs['tracking']:
+            if self.prev_frame_info['sample_idx'] == 0:
+                self.prev_frame_info['tracking_history'] = dict(prev_bbox_preds=[],
+                                                                delta_x=[],
+                                                                delta_y=[],
+                                                                delta_theta=[],
+                                                                length=0)
+            else:
+                self.prev_frame_info['tracking_history']['delta_x'].append(img_metas[0][0]['can_bus'][0])
+                self.prev_frame_info['tracking_history']['delta_y'].append(img_metas[0][0]['can_bus'][1])
+                self.prev_frame_info['tracking_history']['delta_theta'].append(img_metas[0][0]['can_bus'][-1])
+                if self.prev_frame_info['tracking_history']['length'] < kwargs['tracking_length']:
+                    self.prev_frame_info['tracking_history']['length'] += 1
+                else:
+                    del self.prev_frame_info['tracking_history']['delta_x'][0]
+                    del self.prev_frame_info['tracking_history']['delta_y'][0]
+                    del self.prev_frame_info['tracking_history']['delta_theta'][0]
+                    del self.prev_frame_info['tracking_history']['prev_bbox_preds'][0]
+            kwargs['tracking_history'] = self.prev_frame_info['tracking_history']
 
         if kwargs['select_queries_based_on_prev_preds']:
             if self.prev_frame_info['prev_bbox_preds'] is None or (kwargs['alternate'] and self.prev_frame_info['sample_idx'] % kwargs['alternating_period'] == 0):
@@ -226,10 +243,6 @@ class BEVFormer(MVXTwoStageDetector):
                                              img=img[0], # (1, 6, 3, 928, 1600)
                                              prev_bev=self.prev_frame_info['prev_bev'], # (1, 200*200, 256)
                                              **kwargs)
-
-        self.prev_frame_info['prev_pos'] = tmp_pos
-        self.prev_frame_info['prev_angle'] = tmp_angle
-        self.prev_frame_info['prev_bev'] = outs['bev_query']
 
         if kwargs['select_queries_based_on_prev_preds']:
             cls_scores = outs['all_cls_scores'][-1, 0]
@@ -308,10 +321,11 @@ class BEVFormer(MVXTwoStageDetector):
                     bbox_result[0]['pts_bbox']['labels_3d'] = labels.cpu()
                     bbox_result[0]['pts_bbox']['boxes_3d'] = bboxes
 
-        # print('\n\n')
-        # print(bbox_result[0]['pts_bbox']['scores_3d'])
-        # print('\n')
-        # breakpoint()
+        self.prev_frame_info['prev_pos'] = tmp_pos
+        self.prev_frame_info['prev_angle'] = tmp_angle
+        self.prev_frame_info['prev_bev'] = outs['bev_query']
+        if kwargs['tracking']:
+            self.prev_frame_info['tracking_history']['prev_bbox_preds'].append(self.prev_frame_info['prev_bbox_preds'])
 
         if kwargs['log']:
             return bbox_result, kwargs['logger']
