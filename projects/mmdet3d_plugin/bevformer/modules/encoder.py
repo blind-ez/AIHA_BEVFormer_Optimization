@@ -160,33 +160,63 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
                     boundary_coords = torch.cat([forward_boundary_coords, backward_boundary_coords, left_boundary_coords, right_boundary_coords], dim=0)
 
-            n = kwargs['n']
-            occ_reference_coords = kwargs['occ_reference_coords'][0]
+            if kwargs['select_type'] == 'square':
+                n = kwargs['n']
+                occ_reference_coords = kwargs['occ_reference_coords'][0]
 
-            occ_reference_coords = (occ_reference_coords - (-51.2)) / 102.4
-            occ_reference_coords = (occ_reference_coords * 200).to(torch.long)
+                occ_reference_coords = (occ_reference_coords - (-51.2)) / 102.4
+                occ_reference_coords = (occ_reference_coords * 200).to(torch.long)
 
-            xs = (torch.arange(n)-(n//2))[:, None].repeat(1, n).to(bev_query.device)
-            ys = (torch.arange(n)-(n//2))[None, :].repeat(n, 1).to(bev_query.device)
-            offsets = torch.stack((xs, ys), dim=2).view(-1, 2)
+                xs = (torch.arange(n)-(n//2))[:, None].repeat(1, n).to(bev_query.device)
+                ys = (torch.arange(n)-(n//2))[None, :].repeat(n, 1).to(bev_query.device)
+                offsets = torch.stack((xs, ys), dim=2).view(-1, 2)
 
-            occ_mask = occ_reference_coords[:, None, :] + offsets[None, :, :]
-            occ_mask = occ_mask.view(-1, 2)
-            valid_mask = ((occ_mask < 200) & (occ_mask >= 0)).all(1)
-            occ_mask = occ_mask[valid_mask]
+                occ_mask = occ_reference_coords[:, None, :] + offsets[None, :, :]
+                occ_mask = occ_mask.view(-1, 2)
+                valid_mask = ((occ_mask < 200) & (occ_mask >= 0)).all(1)
+                occ_mask = occ_mask[valid_mask]
 
-            if kwargs['select_queries_around_boundary']:
-                occ_mask = torch.cat([occ_mask, boundary_coords], dim=0)
-            occ_mask = torch.unique(occ_mask, dim=0)
+                if kwargs['select_queries_around_boundary']:
+                    occ_mask = torch.cat([occ_mask, boundary_coords], dim=0)
 
-            occ_mask_flattened = (occ_mask[:, 1] * 200) + occ_mask[:, 0]
-            kwargs['occ_mask'] = occ_mask_flattened
+                occ_mask = torch.unique(occ_mask, dim=0)
+                if kwargs['sparse_occ']:
+                    dense_occ_mask = occ_mask
+                    occ_mask = occ_mask[::2]
+
+                occ_mask_flattened = (occ_mask[:, 1] * 200) + occ_mask[:, 0]
+                kwargs['occ_mask'] = occ_mask_flattened
+
+            elif kwargs['select_type'] == 'enlarge':
+                occ_mask = kwargs['occ_reference_coords'][0]
+
+                valid_mask = ((occ_mask < 200) & (occ_mask >= 0)).all(1)
+                occ_mask = occ_mask[valid_mask]
+
+                if kwargs['select_queries_around_boundary']:
+                    occ_mask = torch.cat([occ_mask, boundary_coords], dim=0)
+
+                occ_mask = torch.unique(occ_mask, dim=0)
+                if kwargs['sparse_occ']:
+                    dense_occ_mask = occ_mask
+                    occ_mask = occ_mask[::2]
+
+                occ_mask_flattened = (occ_mask[:, 1] * 200) + occ_mask[:, 0]
+                kwargs['occ_mask'] = occ_mask_flattened
         else:
             kwargs['occ_mask'] = None
 
         if kwargs['restrict_prev_preds']:
-            kwargs['current_occ_mask'].clear()
-            kwargs['current_occ_mask'].append(kwargs['occ_mask'])
+            if kwargs['apply_occ_mask']:
+                if kwargs['sparse_occ']:
+                    kwargs['current_occ_mask'].clear()
+                    kwargs['current_occ_mask'].append((dense_occ_mask[:, 1] * 200) + dense_occ_mask[:, 0])
+                else:
+                    kwargs['current_occ_mask'].clear()
+                    kwargs['current_occ_mask'].append(kwargs['occ_mask'])
+            else:
+                kwargs['current_occ_mask'].clear()
+                kwargs['current_occ_mask'].append(None)
 
         if kwargs['log']:
             if kwargs['apply_occ_mask']:
