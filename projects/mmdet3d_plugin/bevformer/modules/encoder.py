@@ -178,11 +178,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
                 if kwargs['select_queries_around_boundary']:
                     occ_mask = torch.cat([occ_mask, boundary_coords], dim=0)
-
                 occ_mask = torch.unique(occ_mask, dim=0)
-                if kwargs['sparse_occ']:
-                    dense_occ_mask = occ_mask
-                    occ_mask = occ_mask[::2]
 
                 occ_mask_flattened = (occ_mask[:, 1] * 200) + occ_mask[:, 0]
                 kwargs['occ_mask'] = occ_mask_flattened
@@ -195,28 +191,15 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
                 if kwargs['select_queries_around_boundary']:
                     occ_mask = torch.cat([occ_mask, boundary_coords], dim=0)
-
                 occ_mask = torch.unique(occ_mask, dim=0)
-                if kwargs['sparse_occ']:
-                    dense_occ_mask = occ_mask
-                    occ_mask = occ_mask[::2]
 
                 occ_mask_flattened = (occ_mask[:, 1] * 200) + occ_mask[:, 0]
                 kwargs['occ_mask'] = occ_mask_flattened
+
+            kwargs['current_occ_mask'].clear()
+            kwargs['current_occ_mask'].append(kwargs['occ_mask'])
         else:
             kwargs['occ_mask'] = None
-
-        if kwargs['restrict_prev_preds']:
-            if kwargs['apply_occ_mask']:
-                if kwargs['sparse_occ']:
-                    kwargs['current_occ_mask'].clear()
-                    kwargs['current_occ_mask'].append((dense_occ_mask[:, 1] * 200) + dense_occ_mask[:, 0])
-                else:
-                    kwargs['current_occ_mask'].clear()
-                    kwargs['current_occ_mask'].append(kwargs['occ_mask'])
-            else:
-                kwargs['current_occ_mask'].clear()
-                kwargs['current_occ_mask'].append(None)
 
         if kwargs['log']:
             if kwargs['apply_occ_mask']:

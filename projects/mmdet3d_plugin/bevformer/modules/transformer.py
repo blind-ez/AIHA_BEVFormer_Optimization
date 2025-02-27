@@ -21,6 +21,7 @@ from .spatial_cross_attention import MSDeformableAttention3D
 from .decoder import CustomMSDeformableAttention
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
 from mmcv.runner import force_fp32, auto_fp16
+from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
 
 
 @TRANSFORMER.register_module()
@@ -102,83 +103,60 @@ class PerceptionTransformer(BaseModule):
                                img_meta,
                                **kwargs):
 
-        # get shift
-        delta_x = np.array([img_meta['can_bus'][0]])
-        delta_y = np.array([img_meta['can_bus'][1]])
-        ego_angle = np.array(img_meta['can_bus'][-2] * (180 / np.pi))
-        grid_length_x = grid_length[1]
-        grid_length_y = grid_length[0]
-        translation_length = np.sqrt(delta_x**2 + delta_y**2)
-        translation_angle = np.arctan2(delta_y, delta_x) * (180 / np.pi)
-        bev_angle = ego_angle - translation_angle
-        shift_x = translation_length * np.sin(bev_angle * (np.pi / 180)) / grid_length_x / bev_w
-        shift_y = translation_length * np.cos(bev_angle * (np.pi / 180)) / grid_length_y / bev_h
-        shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
-
         # align previous predictions
         if kwargs['apply_occ_mask']:
             if kwargs['select_type'] == 'square':
-                prev_preds = kwargs['prev_bbox_preds']
-                prev_coords = prev_preds[:, :2]
-                prev_velocity = prev_preds[:, -2:]
-                occ_reference_coords = prev_coords + prev_velocity * 0.5
-                rotation_angle = img_meta['can_bus'][-1] * (np.pi / 180)
-                rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=prev_preds.device, dtype=torch.float32)
-                occ_reference_coords = occ_reference_coords @ rotation_matrix.T
-                occ_reference_coords = occ_reference_coords - shift * 200 * 0.512
-                kwargs['occ_reference_coords'].clear()
-                kwargs['occ_reference_coords'].append(occ_reference_coords)
-
+                ego_angle = np.array(img_meta['can_bus'][-2])
+                grid_length_x = grid_length[1]
+                grid_length_y = grid_length[0]
                 if kwargs['tracking']:
-                    if kwargs['tracking_history']['length'] > 1:
-                        for i in range(kwargs['tracking_history']['length'] - 1):
-                            if kwargs['tracking_history']['prev_bbox_preds'][i] is not None:
-                                _delta_x = np.array([sum(kwargs['tracking_history']['delta_x'][i:])])
-                                _delta_y = np.array([sum(kwargs['tracking_history']['delta_y'][i:])])
-                                _translation_length = np.sqrt(_delta_x**2 + _delta_y**2)
-                                _translation_angle = np.arctan2(_delta_y, _delta_x) * (180 / np.pi)
-                                _bev_angle = ego_angle - _translation_angle
-                                _shift_x = _translation_length * np.sin(_bev_angle * (np.pi / 180)) / grid_length_x / bev_w
-                                _shift_y = _translation_length * np.cos(_bev_angle * (np.pi / 180)) / grid_length_y / bev_h
-                                _shift = torch.tensor([_shift_x, _shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
+                    occ_reference_coords_list = []
+                    for i in range(kwargs['tracking_history']['length']):
+                        if len(kwargs['tracking_history']['prev_bbox_preds'][i]) != 0:
+                            delta_x = np.array([sum(kwargs['tracking_history']['delta_x'][i:])])
+                            delta_y = np.array([sum(kwargs['tracking_history']['delta_y'][i:])])
+                            translation_length = np.sqrt(delta_x**2 + delta_y**2)
+                            translation_angle = np.arctan2(delta_y, delta_x)
+                            bev_angle = ego_angle - translation_angle
+                            shift_x = translation_length * np.sin(bev_angle) / grid_length_x / bev_w
+                            shift_y = translation_length * np.cos(bev_angle) / grid_length_y / bev_h
+                            shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
 
-                                _prev_preds = kwargs['tracking_history']['prev_bbox_preds'][i]
-                                _prev_coords = _prev_preds[:, :2]
-                                _prev_velocity = _prev_preds[:, -2:]
-                                _occ_reference_coords = _prev_coords + _prev_velocity * 0.5 * (kwargs['tracking_history']['length'] - i)
-                                _rotation_angle = sum(kwargs['tracking_history']['delta_theta'][i:]) * (np.pi / 180)
-                                _rotation_matrix = torch.tensor([[np.cos(-_rotation_angle), -np.sin(-_rotation_angle)], [np.sin(-_rotation_angle), np.cos(-_rotation_angle)]], device=_prev_preds.device, dtype=torch.float32)
-                                _occ_reference_coords = _occ_reference_coords @ _rotation_matrix.T
-                                _occ_reference_coords = _occ_reference_coords - _shift * 200 * 0.512
-                                kwargs['occ_reference_coords'].append(_occ_reference_coords)
-                        occ_reference_coords = torch.cat(kwargs['occ_reference_coords'])
-                        kwargs['occ_reference_coords'].clear()
-                        kwargs['occ_reference_coords'].append(occ_reference_coords)
+                            prev_preds = kwargs['tracking_history']['prev_bbox_preds'][i]
+                            prev_coords = prev_preds[:, :2]
+                            prev_velocity = prev_preds[:, -2:]
+                            occ_reference_coords = prev_coords + prev_velocity * 0.5 * (kwargs['tracking_history']['length'] - i)
+                            rotation_angle = sum(kwargs['tracking_history']['delta_theta'][i:]) * (np.pi / 180)
+                            rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=prev_preds.device, dtype=torch.float32)
+                            occ_reference_coords = occ_reference_coords @ rotation_matrix.T
+                            occ_reference_coords = occ_reference_coords - shift * 200 * 0.512
+                            occ_reference_coords_list.append(occ_reference_coords)
+                    kwargs['occ_reference_coords'].clear()
+                    kwargs['occ_reference_coords'].append(torch.cat(occ_reference_coords_list))
+                else:
+                    delta_x = np.array([img_meta['can_bus'][0]])
+                    delta_y = np.array([img_meta['can_bus'][1]])
+                    translation_length = np.sqrt(delta_x**2 + delta_y**2)
+                    translation_angle = np.arctan2(delta_y, delta_x)
+                    bev_angle = ego_angle - translation_angle
+                    shift_x = translation_length * np.sin(bev_angle) / grid_length_x / bev_w
+                    shift_y = translation_length * np.cos(bev_angle) / grid_length_y / bev_h
+                    shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
+
+                    prev_preds = kwargs['prev_bbox_preds']
+                    prev_coords = prev_preds[:, :2]
+                    prev_velocity = prev_preds[:, -2:]
+                    occ_reference_coords = prev_coords + prev_velocity * 0.5
+                    rotation_angle = img_meta['can_bus'][-1] * (np.pi / 180)
+                    rotation_matrix = torch.tensor([[np.cos(-rotation_angle), -np.sin(-rotation_angle)], [np.sin(-rotation_angle), np.cos(-rotation_angle)]], device=prev_preds.device, dtype=torch.float32)
+                    occ_reference_coords = occ_reference_coords @ rotation_matrix.T
+                    occ_reference_coords = occ_reference_coords - shift * 200 * 0.512
+                    kwargs['occ_reference_coords'].clear()
+                    kwargs['occ_reference_coords'].append(occ_reference_coords)
 
             elif kwargs['select_type'] == 'enlarge':
                 prev_preds = kwargs['prev_bbox_preds']
-
-                def denormalize_bboxes(normalized_bboxes):
-                    rot_sine = normalized_bboxes[..., 6:7]
-                    rot_cosine = normalized_bboxes[..., 7:8]
-                    rot = torch.atan2(rot_sine, rot_cosine)
-                    cx = normalized_bboxes[..., 0:1]
-                    cy = normalized_bboxes[..., 1:2]
-                    cz = normalized_bboxes[..., 4:5]
-                    w = normalized_bboxes[..., 2:3]
-                    l = normalized_bboxes[..., 3:4]
-                    h = normalized_bboxes[..., 5:6]
-                    w = w.exp() 
-                    l = l.exp() 
-                    h = h.exp() 
-                    if normalized_bboxes.size(-1) > 8:
-                        vx = normalized_bboxes[:, 8:9]
-                        vy = normalized_bboxes[:, 9:10]
-                        return torch.cat([cx, cy, cz, w, l, h, rot, vx, vy], dim=-1)
-                    else:
-                        return torch.cat([cx, cy, cz, w, l, h, rot], dim=-1)
-
-                prev_preds = denormalize_bboxes(prev_preds)
+                prev_preds = denormalize_bbox(prev_preds, kwargs['pc_range'])
 
                 bbox_coords = []
                 for bbox in prev_preds:
@@ -218,6 +196,18 @@ class PerceptionTransformer(BaseModule):
                 bbox_coords = torch.cat(bbox_coords)
                 kwargs['occ_reference_coords'].clear()
                 kwargs['occ_reference_coords'].append(bbox_coords)
+        else:
+            delta_x = np.array([img_meta['can_bus'][0]])
+            delta_y = np.array([img_meta['can_bus'][1]])
+            ego_angle = np.array(img_meta['can_bus'][-2])
+            grid_length_x = grid_length[1]
+            grid_length_y = grid_length[0]
+            translation_length = np.sqrt(delta_x**2 + delta_y**2)
+            translation_angle = np.arctan2(delta_y, delta_x)
+            bev_angle = ego_angle - translation_angle
+            shift_x = translation_length * np.sin(bev_angle) / grid_length_x / bev_w
+            shift_y = translation_length * np.cos(bev_angle) / grid_length_y / bev_h
+            shift = torch.tensor([shift_x, shift_y], device=bev_query.device, dtype=bev_query.dtype).permute(1, 0)
 
         # integrate can_bus info into bev_query
         can_bus = torch.tensor([img_meta['can_bus']], device=bev_query.device, dtype=bev_query.dtype) # (1, 18)
@@ -253,7 +243,7 @@ class PerceptionTransformer(BaseModule):
             stacked_bev = stacked_bev.reshape(2, bev_h * bev_w, -1) # (2, 200*200, 256)
         else:
             stacked_bev = prev_bev # None
-            
+
         return shift, bev_query, feats_flatten, spatial_shapes, level_start_index, stacked_bev
 
     @auto_fp16(apply_to=('mlvl_feats', 'bev_query', 'bev_pos', 'prev_bev'))

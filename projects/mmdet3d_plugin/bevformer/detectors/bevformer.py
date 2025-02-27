@@ -187,18 +187,16 @@ class BEVFormer(MVXTwoStageDetector):
 
     def forward_test(self, img_metas, img, **kwargs):
         if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
-            self.prev_frame_info['prev_bev'] = None
-            if kwargs['select_queries_based_on_prev_preds']:
-                self.prev_frame_info['prev_bbox_preds'] = None
             self.prev_frame_info['sample_idx'] = 0
         else:
             self.prev_frame_info['sample_idx'] += 1
-
         self.prev_frame_info['scene_token'] = img_metas[0][0]['scene_token']
+
+        if self.prev_frame_info['sample_idx'] == 0:
+            self.prev_frame_info['prev_bev'] = None
 
         tmp_pos = copy.deepcopy(img_metas[0][0]['can_bus'][:3])
         tmp_angle = copy.deepcopy(img_metas[0][0]['can_bus'][-1])
-
         if self.prev_frame_info['sample_idx'] == 0:
             img_metas[0][0]['can_bus'][:3] = 0
             img_metas[0][0]['can_bus'][-1] = 0
@@ -214,6 +212,7 @@ class BEVFormer(MVXTwoStageDetector):
                                                                 delta_theta=[],
                                                                 length=0)
             else:
+                self.prev_frame_info['tracking_history']['prev_bbox_preds'].append(self.prev_frame_info['prev_bbox_preds'])
                 self.prev_frame_info['tracking_history']['delta_x'].append(img_metas[0][0]['can_bus'][0])
                 self.prev_frame_info['tracking_history']['delta_y'].append(img_metas[0][0]['can_bus'][1])
                 self.prev_frame_info['tracking_history']['delta_theta'].append(img_metas[0][0]['can_bus'][-1])
@@ -224,20 +223,25 @@ class BEVFormer(MVXTwoStageDetector):
                     del self.prev_frame_info['tracking_history']['delta_y'][0]
                     del self.prev_frame_info['tracking_history']['delta_theta'][0]
                     del self.prev_frame_info['tracking_history']['prev_bbox_preds'][0]
+
             kwargs['tracking_history'] = self.prev_frame_info['tracking_history']
 
         if kwargs['select_queries_based_on_prev_preds']:
-            if self.prev_frame_info['prev_bbox_preds'] is None or (kwargs['alternate'] and self.prev_frame_info['sample_idx'] % kwargs['alternating_period'] == 0):
+            if self.prev_frame_info['sample_idx'] == 0 or len(self.prev_frame_info['prev_bbox_preds']) == 0:
                 kwargs['apply_occ_mask'] = False
             else:
                 kwargs['apply_occ_mask'] = True
-                kwargs['occ_reference_coords'] = []
-                kwargs['prev_bbox_preds'] = self.prev_frame_info['prev_bbox_preds']
         else:
             kwargs['apply_occ_mask'] = False
 
-        if kwargs['restrict_prev_preds']:
+        if kwargs['alternate'] and (self.prev_frame_info['sample_idx'] % kwargs['alternating_period'] == 0):
+            kwargs['apply_occ_mask'] = False
+
+        if kwargs['apply_occ_mask']:
+            kwargs['occ_reference_coords'] = []
             kwargs['current_occ_mask'] = []
+            if not kwargs['tracking']:
+                kwargs['prev_bbox_preds'] = self.prev_frame_info['prev_bbox_preds']
 
         outs, bbox_result = self.simple_test(img_meta=img_metas[0][0],
                                              img=img[0], # (1, 6, 3, 928, 1600)
@@ -247,85 +251,24 @@ class BEVFormer(MVXTwoStageDetector):
         if kwargs['select_queries_based_on_prev_preds']:
             cls_scores = outs['all_cls_scores'][-1, 0]
             bbox_preds = outs['all_bbox_preds'][-1, 0]
-            confidence_scores = cls_scores.max(1).values.sigmoid()
-            preds_mask = confidence_scores > kwargs['prev_preds_threshold']
-            if preds_mask.sum() == 0:
-                self.prev_frame_info['prev_bbox_preds'] = None
-            else:
-                bbox_preds = bbox_preds[preds_mask]
-                if kwargs['restrict_prev_preds']:
-                    occ_mask = kwargs['current_occ_mask'][0]
-                    if occ_mask is None:
-                        self.prev_frame_info['prev_bbox_preds'] = bbox_preds
-                    else:
-                        bbox_coords = bbox_preds[:, :2]
-                        bbox_coords = (bbox_coords - (-51.2)) / 102.4
-                        bbox_coords = (bbox_coords * 200).to(torch.int32)
-                        bbox_coords_flattened = (bbox_coords[:, 1] * 200) + bbox_coords[:, 0]
-                        preds_mask = (bbox_coords_flattened[:, None] == occ_mask[None, :]).any(-1)
-                        if preds_mask.sum() == 0:
-                            self.prev_frame_info['prev_bbox_preds'] = None
-                        else:
-                            self.prev_frame_info['prev_bbox_preds'] = bbox_preds[preds_mask]
-                else:
-                    self.prev_frame_info['prev_bbox_preds'] = bbox_preds
 
-        if kwargs['accurate_mAP']:
-            cls_scores = outs['all_cls_scores'][-1, 0]
-            bbox_preds = outs['all_bbox_preds'][-1, 0]
+            preds_mask = cls_scores.max(1).values.sigmoid() > kwargs['prev_preds_threshold']
+            bbox_preds = bbox_preds[preds_mask]
 
-            cls_scores, indexs = cls_scores.view(-1).sigmoid().topk(9000)
-
-            labels = indexs % 10
-
-            bbox_index = indexs // 10
-            bbox_preds = bbox_preds[bbox_index]
-
-            occ_mask = kwargs['current_occ_mask'][0]
-            if occ_mask is not None:
+            if kwargs['apply_occ_mask']:
+                occ_mask = kwargs['current_occ_mask'][0]
                 bbox_coords = bbox_preds[:, :2]
                 bbox_coords = (bbox_coords - (-51.2)) / 102.4
-                bbox_coords = (bbox_coords * 200).to(torch.int32)
+                bbox_coords = (bbox_coords * 200).to(torch.int64)
                 bbox_coords_flattened = (bbox_coords[:, 1] * 200) + bbox_coords[:, 0]
-
                 preds_mask = (bbox_coords_flattened[:, None] == occ_mask[None, :]).any(-1)
-                if preds_mask.sum() != 0:
-                    cls_scores = cls_scores[preds_mask]
-                    normalized_bboxes = bbox_preds[preds_mask]
-                    labels = labels[preds_mask]
+                bbox_preds = bbox_preds[preds_mask]
 
-                    rot_sine = normalized_bboxes[..., 6:7]
-                    rot_cosine = normalized_bboxes[..., 7:8]
-                    rot = torch.atan2(rot_sine, rot_cosine)
-                    cx = normalized_bboxes[..., 0:1]
-                    cy = normalized_bboxes[..., 1:2]
-                    cz = normalized_bboxes[..., 4:5]
-                    w = normalized_bboxes[..., 2:3]
-                    l = normalized_bboxes[..., 3:4]
-                    h = normalized_bboxes[..., 5:6]
-                    w = w.exp() 
-                    l = l.exp() 
-                    h = h.exp() 
-                    vx = normalized_bboxes[:, 8:9]
-                    vy = normalized_bboxes[:, 9:10]
-                    denormalized_bboxes = torch.cat([cx, cy, cz, w, l, h, rot, vx, vy], dim=-1)
-
-                    if len(labels) > 300:
-                        cls_scores = cls_scores[:300]
-                        denormalized_bboxes = denormalized_bboxes[:300]
-                        labels = labels[:300]
-
-                    bboxes = img_metas[0][0]['box_type_3d'](denormalized_bboxes.cpu(), 9)
-
-                    bbox_result[0]['pts_bbox']['scores_3d'] = cls_scores.cpu()
-                    bbox_result[0]['pts_bbox']['labels_3d'] = labels.cpu()
-                    bbox_result[0]['pts_bbox']['boxes_3d'] = bboxes
+            self.prev_frame_info['prev_bbox_preds'] = bbox_preds
 
         self.prev_frame_info['prev_pos'] = tmp_pos
         self.prev_frame_info['prev_angle'] = tmp_angle
         self.prev_frame_info['prev_bev'] = outs['bev_query']
-        if kwargs['tracking']:
-            self.prev_frame_info['tracking_history']['prev_bbox_preds'].append(self.prev_frame_info['prev_bbox_preds'])
 
         if kwargs['log']:
             return bbox_result, kwargs['logger']
@@ -337,7 +280,7 @@ class BEVFormer(MVXTwoStageDetector):
 
         outs = self.pts_bbox_head(mlvl_feats=mlvl_feats, prev_bev=prev_bev, img_meta=img_meta, **kwargs)
 
-        bboxes, scores, labels = self.pts_bbox_head.get_bboxes(preds_dicts=outs, img_meta=img_meta, rescale=rescale)
+        bboxes, scores, labels = self.pts_bbox_head.get_bboxes(preds_dicts=outs, img_meta=img_meta, rescale=rescale, **kwargs)
         bbox_result = [{'pts_bbox': bbox3d2result(bboxes, scores, labels)}]
 
         return outs, bbox_result
