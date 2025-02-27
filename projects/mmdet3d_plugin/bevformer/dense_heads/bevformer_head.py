@@ -9,8 +9,10 @@ from mmdet.models.utils.transformer import inverse_sigmoid
 from mmdet.models import HEADS
 from mmdet.models.dense_heads import DETRHead
 from mmdet3d.core.bbox.coders import build_bbox_coder
-from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox, denormalize_bbox
+from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from mmcv.runner import force_fp32, auto_fp16
+
+from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
 
 
 @HEADS.register_module()
@@ -437,7 +439,7 @@ class BEVFormerHead(DETRHead):
             scores = scores[preds_mask]
             labels = labels[preds_mask]
 
-            bboxes = denormalize_bbox(bboxes, self.pc_range)
+            bboxes = denormalize_bbox(bboxes)
             bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
             bboxes = img_meta['box_type_3d'](bboxes, 9)
 

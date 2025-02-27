@@ -136,30 +136,31 @@ class TemporalSelfAttention(BaseModule):
             attention_weights = attention_weights.softmax(-1) # (2, num_activated_queries, 8, 1, 4)
 
             if kwargs['prune_values']:
-                list1 = []
-                list2 = []
+                bev_idxs_list = []
+                lvl_idxs_list = []
                 for lvl in range(2):
                     tmp = sampling_locations[lvl].reshape(-1, 2)
-                    tmp_mask = ((tmp>0.0) & (tmp<1.0)).all(-1)
-                    tmp = tmp[tmp_mask]
+                    mask = ((tmp > 0.0) & (tmp < 1.0)).all(-1)
+                    tmp = tmp[mask]
                     tmp = (tmp * (200-1)).to(torch.int64)
                     tmp = torch.unique(tmp, dim=0)
-                    offsets = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], device=tmp.device)
+                    offsets = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], device=tmp.device, dtype=tmp.dtype)
                     tmp = tmp[:, None, :] + offsets[None, :, :]
-                    tmp = torch.unique(tmp.view(-1, 2), dim=0)
-                    tmp_flattened = (tmp[:, 1] * 200) + tmp[:, 0]
-                    lvl_index = torch.zeros_like(tmp_flattened) + lvl
-                    list1.append(tmp_flattened)
-                    list2.append(lvl_index)
-                aa = torch.cat(list1)
-                bb = torch.cat(list2)
+                    tmp = tmp.view(-1, 2)
+                    tmp = torch.unique(tmp, dim=0)
+                    bev_idxs = (tmp[:, 1] * 200) + tmp[:, 0]
+                    lvl_idxs = torch.zeros_like(bev_idxs) + lvl
+                    bev_idxs_list.append(bev_idxs)
+                    lvl_idxs_list.append(lvl_idxs)
+                bev_idxs = torch.cat(bev_idxs_list)
+                lvl_idxs = torch.cat(lvl_idxs_list)
 
-                valid_value = self.value_proj(value[bb, aa, :])
+                valid_value = self.value_proj(value[lvl_idxs, bev_idxs, :])
                 if kwargs['log']:
-                    kwargs['sample_logger']['num_values']['self_attn'].append(len(aa))
+                    kwargs['sample_logger']['num_values']['self_attn'].append(len(bev_idxs))
                 value_buffer = torch.zeros_like(value) # (2, 200*200, 256)
-                value_buffer[bb, aa, :] = valid_value
-                value = value_buffer.reshape(2, num_bev_cells, self.num_heads, -1) # (2, 200*200, 8, 32)
+                value_buffer[lvl_idxs, bev_idxs, :] = valid_value
+                value = value_buffer.view(2, num_bev_cells, self.num_heads, -1) # (2, 200*200, 8, 32)
             else:
                 value = self.value_proj(value) # (2, 200*200, 256)
                 if kwargs['log']:

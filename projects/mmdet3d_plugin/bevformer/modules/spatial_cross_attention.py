@@ -256,32 +256,33 @@ class MSDeformableAttention3D(BaseModule):
         attention_weights = attention_weights.view(6, num_query, self.num_heads, self.num_levels, self.num_points) # (6, max_num, 8, 4, 8)
 
         if kwargs['prune_values']:
-            list1 = []
-            list2 = []
+            pixel_idxs_list = []
+            view_idxs_list = []
             for view in range(6):
                 for scale in range(4):
                     tmp = sampling_locations[view, :, :, scale, :, :].reshape(-1, 2)
-                    tmp_mask = ((tmp>0.0) & (tmp<1.0)).all(-1)
-                    tmp = tmp[tmp_mask]
-                    tmp_spatial_shape = torch.tensor((spatial_shapes[scale][1], spatial_shapes[scale][0]), device=tmp.device)
-                    tmp = (tmp * (tmp_spatial_shape-1)).to(torch.int64)
+                    mask = ((tmp > 0.0) & (tmp < 1.0)).all(-1)
+                    tmp = tmp[mask]
+                    spatial_shape = torch.tensor([spatial_shapes[scale][1], spatial_shapes[scale][0]], device=tmp.device, dtype=torch.int64)
+                    tmp = (tmp * (spatial_shape-1)).to(torch.int64)
                     tmp = torch.unique(tmp, dim=0)
-                    offsets = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], device=tmp.device)
+                    offsets = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], device=tmp.device, dtype=tmp.dtype)
                     tmp = tmp[:, None, :] + offsets[None, :, :]
-                    tmp = torch.unique(tmp.view(-1, 2), dim=0)
-                    tmp_flattened = (tmp[:, 1] * tmp_spatial_shape[0]) + tmp[:, 0] + level_start_index[scale]
-                    view_index = torch.zeros_like(tmp_flattened) + view
-                    list1.append(tmp_flattened)
-                    list2.append(view_index)
-            aa = torch.cat(list1)
-            bb = torch.cat(list2)
+                    tmp = tmp.view(-1, 2)
+                    tmp = torch.unique(tmp, dim=0)
+                    pixel_idxs = (tmp[:, 1] * spatial_shape[0]) + tmp[:, 0] + level_start_index[scale]
+                    view_idxs = torch.zeros_like(pixel_idxs) + view
+                    pixel_idxs_list.append(pixel_idxs)
+                    view_idxs_list.append(view_idxs)
+            pixel_idxs = torch.cat(pixel_idxs_list)
+            view_idxs = torch.cat(view_idxs_list)
 
             _, num_value, _ = value.shape
-            valid_value = self.value_proj(value[bb, aa, :])
+            valid_value = self.value_proj(value[view_idxs, pixel_idxs, :])
             if kwargs['log']:
-                kwargs['sample_logger']['num_values']['cross_attn'].append(len(aa))
+                kwargs['sample_logger']['num_values']['cross_attn'].append(len(pixel_idxs))
             value_buffer = torch.zeros_like(value)
-            value_buffer[bb, aa, :] = valid_value
+            value_buffer[view_idxs, pixel_idxs, :] = valid_value
             value = value_buffer.view(6, num_value, self.num_heads, -1)
         else:
             _, num_value, _ = value.shape # (H/8)(W/8)+(H/16)(W/16)+(H/32)(W/32)+(H/64)(W/64)

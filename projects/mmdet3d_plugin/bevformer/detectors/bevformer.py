@@ -10,6 +10,9 @@ import numpy as np
 import mmdet3d
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
 
+from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
+from scipy.optimize import linear_sum_assignment
+
 
 @DETECTORS.register_module()
 class BEVFormer(MVXTwoStageDetector):
@@ -131,10 +134,6 @@ class BEVFormer(MVXTwoStageDetector):
                                             gt_bboxes_ignore, prev_bev)
 
         losses.update(losses_pts)
-        # print('\n\n')
-        # print(losses['loss_cls'])
-        # print('\n')
-        # breakpoint()
         return losses
 
     def obtain_history_bev(self, imgs_queue, img_metas_list):
@@ -206,24 +205,10 @@ class BEVFormer(MVXTwoStageDetector):
 
         if kwargs['tracking']:
             if self.prev_frame_info['sample_idx'] == 0:
-                self.prev_frame_info['tracking_history'] = dict(prev_bbox_preds=[],
-                                                                delta_x=[],
-                                                                delta_y=[],
-                                                                delta_theta=[],
-                                                                length=0)
+                self.prev_frame_info['tracking_history'] = dict(prev_bbox_preds=torch.empty(0, 5).cuda())
             else:
-                self.prev_frame_info['tracking_history']['prev_bbox_preds'].append(self.prev_frame_info['prev_bbox_preds'])
-                self.prev_frame_info['tracking_history']['delta_x'].append(img_metas[0][0]['can_bus'][0])
-                self.prev_frame_info['tracking_history']['delta_y'].append(img_metas[0][0]['can_bus'][1])
-                self.prev_frame_info['tracking_history']['delta_theta'].append(img_metas[0][0]['can_bus'][-1])
-                if self.prev_frame_info['tracking_history']['length'] < kwargs['tracking_length']:
-                    self.prev_frame_info['tracking_history']['length'] += 1
-                else:
-                    del self.prev_frame_info['tracking_history']['delta_x'][0]
-                    del self.prev_frame_info['tracking_history']['delta_y'][0]
-                    del self.prev_frame_info['tracking_history']['delta_theta'][0]
-                    del self.prev_frame_info['tracking_history']['prev_bbox_preds'][0]
-
+                self.prev_frame_info['tracking_history']['prev_bbox_preds'] = torch.cat([self.prev_frame_info['tracking_history']['prev_bbox_preds'],
+                                                                                         self.prev_frame_info['prev_bbox_preds']], dim=0)
             kwargs['tracking_history'] = self.prev_frame_info['tracking_history']
 
         if kwargs['select_queries_based_on_prev_preds']:
@@ -264,6 +249,25 @@ class BEVFormer(MVXTwoStageDetector):
                 preds_mask = (bbox_coords_flattened[:, None] == occ_mask[None, :]).any(-1)
                 bbox_preds = bbox_preds[preds_mask]
 
+            bbox_preds = denormalize_bbox(bbox_preds)
+            bbox_preds[:, 2] = bbox_preds[:, 2] - bbox_preds[:, 5] * 0.5
+
+            if kwargs['tracking']:
+                bbox_preds = torch.cat([bbox_preds[:, [0, 1, 7, 8]], torch.ones_like(bbox_preds[:, :1])], dim=1)
+
+                trks = self.prev_frame_info['tracking_history']['prev_bbox_preds']
+                dets = bbox_preds
+
+                still_young = (trks[:, -1] <= kwargs['tracking_length'])
+                trks = trks[still_young]
+
+                aff_matrix = self.get_aff_matrix(trks, dets)
+                row_idx, col_idx = linear_sum_assignment(-aff_matrix)
+                matched = row_idx[(aff_matrix[row_idx, col_idx] > -3)].tolist()
+                unmatched = [i for i in range(len(trks)) if i not in matched]
+                trks = trks[unmatched]
+                self.prev_frame_info['tracking_history']['prev_bbox_preds'] = trks
+
             self.prev_frame_info['prev_bbox_preds'] = bbox_preds
 
         self.prev_frame_info['prev_pos'] = tmp_pos
@@ -284,3 +288,14 @@ class BEVFormer(MVXTwoStageDetector):
         bbox_result = [{'pts_bbox': bbox3d2result(bboxes, scores, labels)}]
 
         return outs, bbox_result
+
+    def get_aff_matrix(self, trks, dets):
+        trk_centers = trks[:, :2]
+        det_centers = dets[:, :2]
+
+        trk_centers_expanded = trk_centers[:, None, :].repeat(1, len(det_centers), 1)
+        det_centers_expanded = det_centers[None, :, :].repeat(len(trk_centers), 1, 1)
+
+        aff_matrix = -((((trk_centers_expanded - det_centers_expanded)**2).sum(-1))**0.25).cpu().numpy()
+
+        return aff_matrix
