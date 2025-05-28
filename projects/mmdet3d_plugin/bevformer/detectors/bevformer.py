@@ -200,6 +200,7 @@ class BEVFormer(MVXTwoStageDetector):
             img_metas[0][0]['can_bus'][:3] -= self.prev_frame_info['prev_pos']
             img_metas[0][0]['can_bus'][-1] -= self.prev_frame_info['prev_angle']
 
+        kwargs['current_occ_mask'] = []
         new_prev_bev, bbox_result = self.simple_test(img_meta=img_metas[0][0],
                                                      img=img[0], # (1, 6, 3, 928, 1600)
                                                      prev_bev=self.prev_frame_info['prev_bev'], # (1, 200*200, 256)
@@ -222,7 +223,7 @@ class BEVFormer(MVXTwoStageDetector):
 
         new_prev_bev = outs['bev_query']
 
-        bboxes, scores, labels = self.pts_bbox_head.get_bboxes(preds_dicts=outs, img_meta=img_meta, rescale=rescale)
+        bboxes, scores, labels = self.pts_bbox_head.get_bboxes(preds_dicts=outs, img_meta=img_meta, rescale=rescale, **kwargs)
         bbox_result = [{'pts_bbox': bbox3d2result(bboxes, scores, labels)}]
 
         return new_prev_bev, bbox_result

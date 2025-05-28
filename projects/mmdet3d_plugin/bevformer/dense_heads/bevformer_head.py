@@ -12,6 +12,7 @@ from mmdet3d.core.bbox.coders import build_bbox_coder
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from mmcv.runner import force_fp32, auto_fp16
 
+from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
 
 @HEADS.register_module()
 class BEVFormerHead(DETRHead):
@@ -416,16 +417,34 @@ class BEVFormerHead(DETRHead):
         return loss_dict
 
     @force_fp32(apply_to=('preds_dicts'))
-    def get_bboxes(self, preds_dicts, img_meta, rescale=False):
-        preds_dict = self.bbox_coder.decode(preds_dicts)[0]
+    def get_bboxes(self, preds_dicts, img_meta, rescale=False, **kwargs):
 
-        bboxes = preds_dict['bboxes']
+        bboxes = preds_dicts['all_bbox_preds'][-1, 0]
+        scores = preds_dicts['all_cls_scores'][-1, 0]
+
+        scores, indexs = scores.view(-1).sigmoid().topk(9000)
+        labels = indexs % 10
+        bbox_index = indexs // 10
+        bboxes = bboxes[bbox_index]
+
+        occ_mask = kwargs['current_occ_mask'][0]
+        bbox_coords = bboxes[:, :2]
+        bbox_coords = (bbox_coords - (-51.2)) / 102.4
+        bbox_coords = (bbox_coords * 200).to(torch.int32)
+        bbox_coords_flattened = (bbox_coords[:, 1] * 200) + bbox_coords[:, 0]
+        preds_mask = (bbox_coords_flattened[:, None] == occ_mask[None, :]).any(-1)
+
+        bboxes = bboxes[preds_mask]
+        scores = scores[preds_mask]
+        labels = labels[preds_mask]
+
+        bboxes = denormalize_bbox(bboxes)
         bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
-        code_size = bboxes.shape[-1]
-        bboxes = img_meta['box_type_3d'](bboxes, code_size)
+        bboxes = img_meta['box_type_3d'](bboxes, 9)
 
-        scores = preds_dict['scores']
-
-        labels = preds_dict['labels']
+        if len(labels) > 300:
+            bboxes = bboxes[:300]
+            scores = scores[:300]
+            labels = labels[:300]
 
         return bboxes, scores, labels

@@ -23,7 +23,7 @@ def normalize_bbox(bboxes, pc_range):
         )
     return normalized_bboxes
 
-def denormalize_bbox(normalized_bboxes, pc_range):
+def denormalize_bbox(normalized_bboxes):
     # rotation 
     rot_sine = normalized_bboxes[..., 6:7]
 

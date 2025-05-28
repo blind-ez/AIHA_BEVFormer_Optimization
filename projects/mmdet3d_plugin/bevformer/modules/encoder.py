@@ -129,32 +129,36 @@ class BEVFormerEncoder(TransformerLayerSequence):
                                                                                           device=bev_query.device,
                                                                                           dtype=bev_query.dtype) # (2, 200*200, 1, 2), (1, 4, 200*200, 3), (6, 1, 200*200, 4)
 
-        n = 25
-        bev_size = bev_h
+        n = 69
 
         gt_bboxes = kwargs['gt_bboxes_3d'][0][0].tensor.clone().detach().to(bev_query.device)
         gt_labels = kwargs['gt_labels_3d'][0][0].clone().detach().to(bev_query.device)
 
         gt_bboxes = gt_bboxes[gt_labels!=-1]
-        gt_labels = gt_labels[gt_labels!=-1]
 
-        if len(gt_bboxes)==0:
-            return bev_query
-
-        bboxes_coords = gt_bboxes[:, :2]
-        normalized_bboxes_coords = (bboxes_coords - (-51.2)) / 102.4
-        bev_coords = (normalized_bboxes_coords * bev_size).to(torch.long)
+        occ_reference_coords = gt_bboxes[:, :2]
+        occ_reference_coords = (occ_reference_coords - (-51.2)) / 102.4
+        occ_reference_coords = (occ_reference_coords * 200).to(torch.long)
 
         xs = (torch.arange(n)-(n//2))[:, None].repeat(1, n).to(bev_query.device)
         ys = (torch.arange(n)-(n//2))[None, :].repeat(n, 1).to(bev_query.device)
-        offsets = torch.stack((xs, ys), dim=2).view(-1, 2)[None, :, :]
+        offsets = torch.stack((xs, ys), dim=2).view(-1, 2)
 
-        expanded_coords = bev_coords[:, None, :] + offsets
-        unique_coords = torch.unique(expanded_coords.view(-1, 2), dim=0)
-        valid_mask = ((unique_coords < bev_size) & (unique_coords >= 0)).all(1)
-        valid_coords = unique_coords[valid_mask]
-        occ_mask = (valid_coords[:, 1] * bev_size) + valid_coords[:, 0]
-        kwargs['occ_mask'] = occ_mask
+        occ_mask = occ_reference_coords[:, None, :] + offsets[None, :, :]
+        occ_mask = occ_mask.view(-1, 2)
+        valid_mask = ((occ_mask < 200) & (occ_mask >= 0)).all(1)
+        occ_mask = occ_mask[valid_mask]
+        occ_mask = torch.unique(occ_mask, dim=0)
+
+        if len(occ_mask) != 0:
+            occ_mask_flattened = (occ_mask[:, 1] * 200) + occ_mask[:, 0]
+        else:
+            occ_mask_flattened = torch.arange(40000).to(bev_query.device)
+
+        kwargs['occ_mask'] = occ_mask_flattened
+
+        kwargs['current_occ_mask'].clear()
+        kwargs['current_occ_mask'].append(kwargs['occ_mask'])
 
         for lid, layer in enumerate(self.layers):
             bev_query = layer(query=bev_query, # (1, 200*200, 256)
