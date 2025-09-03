@@ -12,6 +12,8 @@ from mmdet3d.core.bbox.coders import build_bbox_coder
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from mmcv.runner import force_fp32, auto_fp16
 
+from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
+
 
 @HEADS.register_module()
 class BEVFormerHead(DETRHead):
@@ -115,7 +117,7 @@ class BEVFormerHead(DETRHead):
                 nn.init.constant_(m[-1].bias, bias_init)
 
     @auto_fp16(apply_to=('mlvl_feats'))
-    def forward(self, mlvl_feats, img_metas, prev_bev=None,  only_bev=False):
+    def forward(self, mlvl_feats, img_metas, prev_bev=None,  only_bev=False, **kwargs):
         """Forward function.
         Args:
             mlvl_feats (tuple[Tensor]): Features from the upstream
@@ -165,7 +167,8 @@ class BEVFormerHead(DETRHead):
                 reg_branches=self.reg_branches if self.with_box_refine else None,  # noqa:E501
                 cls_branches=self.cls_branches if self.as_two_stage else None,
                 img_metas=img_metas,
-                prev_bev=prev_bev
+                prev_bev=prev_bev,
+                **kwargs
         )
 
         bev_embed, hs, init_reference, inter_references = outputs
@@ -480,7 +483,7 @@ class BEVFormerHead(DETRHead):
         return loss_dict
 
     @force_fp32(apply_to=('preds_dicts'))
-    def get_bboxes(self, preds_dicts, img_metas, rescale=False):
+    def get_bboxes(self, preds_dicts, img_metas, rescale=False, **kwargs):
         """Generate bboxes from bbox head predictions.
         Args:
             preds_dicts (tuple[list[dict]]): Prediction results.
@@ -489,24 +492,60 @@ class BEVFormerHead(DETRHead):
             list[dict]: Decoded bbox, scores and labels after nms.
         """
 
-        preds_dicts = self.bbox_coder.decode(preds_dicts)
+        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+            bboxes = preds_dicts['all_bbox_preds'][-1, 0]
+            scores = preds_dicts['all_cls_scores'][-1, 0]
 
-        num_samples = len(preds_dicts)
-        ret_list = []
-        for i in range(num_samples):
-            preds = preds_dicts[i]
-            bboxes = preds['bboxes']
+            _, num_classes = scores.shape
 
+            scores, indexs = scores.view(-1).sigmoid().sort(descending=True)
+
+            labels = indexs % num_classes
+
+            bbox_index = indexs // num_classes
+            bboxes = bboxes[bbox_index]
+
+            bbox_bev_coords = bboxes.new_zeros([bboxes.shape[0], 2])
+            bbox_bev_coords[:, 0] = ((bboxes[:, 0] - self.pc_range[0]) / (self.pc_range[3] - self.pc_range[0])) * self.bev_w
+            bbox_bev_coords[:, 1] = ((bboxes[:, 1] - self.pc_range[1]) / (self.pc_range[4] - self.pc_range[1])) * self.bev_h
+            bbox_bev_coords = bbox_bev_coords.to(torch.int64)
+            bbox_bev_idxs = (bbox_bev_coords[:, 1] * self.bev_w) + bbox_bev_coords[:, 0]
+
+            preds_mask = (bbox_bev_idxs[:, None] == kwargs['frame_cache']['active_bev_idxs'][None, :]).any(-1)
+
+            bboxes = bboxes[preds_mask]
+            scores = scores[preds_mask]
+            labels = labels[preds_mask]
+
+            bboxes = denormalize_bbox(bboxes, self.pc_range)
             bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
+            bboxes = img_metas[0]['box_type_3d'](bboxes, 9)
 
-            code_size = bboxes.shape[-1]
-            bboxes = img_metas[i]['box_type_3d'](bboxes, code_size)
-            scores = preds['scores']
-            labels = preds['labels']
+            if len(labels) > 300:
+                bboxes = bboxes[:300]
+                scores = scores[:300]
+                labels = labels[:300]
 
-            ret_list.append([bboxes, scores, labels])
+            return [[bboxes, scores, labels]]
+        else:
+            preds_dicts = self.bbox_coder.decode(preds_dicts)
 
-        return ret_list
+            num_samples = len(preds_dicts)
+            ret_list = []
+            for i in range(num_samples):
+                preds = preds_dicts[i]
+                bboxes = preds['bboxes']
+
+                bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
+
+                code_size = bboxes.shape[-1]
+                bboxes = img_metas[i]['box_type_3d'](bboxes, code_size)
+                scores = preds['scores']
+                labels = preds['labels']
+
+                ret_list.append([bboxes, scores, labels])
+
+            return ret_list
 
 
 @HEADS.register_module()

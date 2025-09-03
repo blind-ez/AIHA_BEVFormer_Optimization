@@ -149,9 +149,8 @@ class CustomNuScenesDataset(NuScenesDataset):
                     lidar2cam=lidar2cam_rts,
                 ))
 
-        if not self.test_mode:
-            annos = self.get_ann_info(index)
-            input_dict['ann_info'] = annos
+        annos = self.get_ann_info(index)
+        input_dict['ann_info'] = annos
 
         rotation = Quaternion(input_dict['ego2global_rotation'])
         translation = input_dict['ego2global_translation']

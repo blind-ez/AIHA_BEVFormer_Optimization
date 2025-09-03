@@ -40,7 +40,8 @@ class BEVFormer(MVXTwoStageDetector):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 video_test_mode=False
+                 video_test_mode=False,
+                 runtime_options=None
                  ):
 
         super(BEVFormer,
@@ -63,6 +64,7 @@ class BEVFormer(MVXTwoStageDetector):
             'prev_angle': 0,
         }
 
+        self.runtime_options = runtime_options
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
@@ -260,6 +262,9 @@ class BEVFormer(MVXTwoStageDetector):
             img_metas[0][0]['can_bus'][-1] = 0
             img_metas[0][0]['can_bus'][:3] = 0
 
+        kwargs.update(runtime_options=self.runtime_options)
+        kwargs.update(frame_cache=dict())
+
         new_prev_bev, bbox_results = self.simple_test(
             img_metas[0], img[0], prev_bev=self.prev_frame_info['prev_bev'], **kwargs)
         # During inference, we save the BEV features and ego motion of each timestamp.
@@ -268,25 +273,25 @@ class BEVFormer(MVXTwoStageDetector):
         self.prev_frame_info['prev_bev'] = new_prev_bev
         return bbox_results
 
-    def simple_test_pts(self, x, img_metas, prev_bev=None, rescale=False):
+    def simple_test_pts(self, x, img_metas, prev_bev=None, rescale=False, **kwargs):
         """Test function"""
-        outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev)
+        outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev, **kwargs)
 
         bbox_list = self.pts_bbox_head.get_bboxes(
-            outs, img_metas, rescale=rescale)
+            outs, img_metas, rescale=rescale, **kwargs)
         bbox_results = [
             bbox3d2result(bboxes, scores, labels)
             for bboxes, scores, labels in bbox_list
         ]
         return outs['bev_embed'], bbox_results
 
-    def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False):
+    def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False, **kwargs):
         """Test function without augmentaiton."""
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
 
         bbox_list = [dict() for i in range(len(img_metas))]
         new_prev_bev, bbox_pts = self.simple_test_pts(
-            img_feats, img_metas, prev_bev, rescale=rescale)
+            img_feats, img_metas, prev_bev, rescale=rescale, **kwargs)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
         return new_prev_bev, bbox_list

@@ -20,6 +20,8 @@ from .custom_base_transformer_layer import MyCustomBaseTransformerLayer
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 
+from custom_modules.coord_utils import gt_bbox_centers_to_bev_coords, get_padding_offsets, pad_ref_bev_coords
+
 
 @TRANSFORMER_LAYER_SEQUENCE.register_module()
 class BEVFormerEncoder(TransformerLayerSequence):
@@ -211,6 +213,31 @@ class BEVFormerEncoder(TransformerLayerSequence):
             hybird_ref_2d = torch.stack([ref_2d, ref_2d], 1).reshape(
                 bs*2, len_bev, num_bev_level, 2)
 
+        if kwargs['runtime_options']['prune_bev_queries']:
+            if kwargs['runtime_options']['oracle_test']:
+                ref_bev_coords = gt_bbox_centers_to_bev_coords(gt_bboxes=kwargs['gt_bboxes_3d'][0][0], gt_labels=kwargs['gt_labels_3d'][0][0], pc_range=self.pc_range, bev_w=bev_w, bev_h=bev_h)
+                ref_bev_coords = ref_bev_coords.cuda()
+
+                padding_offsets = get_padding_offsets(padding_radius=kwargs['runtime_options']['padding_radius'], grid_size=((self.pc_range[3] - self.pc_range[0]) / bev_w))
+                padding_offsets = padding_offsets.cuda()
+
+                padded_bev_coords = pad_ref_bev_coords(ref_bev_coords=ref_bev_coords, padding_offsets=padding_offsets, bev_w=bev_w, bev_h=bev_h)
+
+                active_bev_idxs = padded_bev_coords[:, 1] * bev_w + padded_bev_coords[:, 0]
+
+                if len(active_bev_idxs) != 0:
+                    kwargs['frame_cache'].update(apply_bev_queries_pruning=True)
+                    kwargs['frame_cache'].update(active_bev_idxs=active_bev_idxs)
+                else:
+                    kwargs['frame_cache'].update(apply_bev_queries_pruning=False)
+
+        if kwargs['runtime_options']['record_num_queries']:
+            kwargs['frame_cache'].update(num_queries=dict())
+            if kwargs['frame_cache']['apply_bev_queries_pruning']:
+                kwargs['frame_cache']['num_queries'].update(self_attn=len(kwargs['frame_cache']['active_bev_idxs']))
+            else:
+                kwargs['frame_cache']['num_queries'].update(self_attn=40000)
+
         for lid, layer in enumerate(self.layers):
             output = layer(
                 bev_query,
@@ -232,6 +259,10 @@ class BEVFormerEncoder(TransformerLayerSequence):
             bev_query = output
             if self.return_intermediate:
                 intermediate.append(output)
+
+        if kwargs['runtime_options']['record_num_queries']:
+            with open(kwargs['runtime_options']['num_queries_log_path'], 'a') as f:
+                f.write(f"{kwargs['frame_cache']['num_queries']['self_attn']}\t{kwargs['frame_cache']['num_queries']['cross_attn']}\n")
 
         if self.return_intermediate:
             return torch.stack(intermediate)
@@ -402,6 +433,11 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 query = self.ffns[ffn_index](
                     query, identity if self.pre_norm else None)
                 ffn_index += 1
+
+        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+            query_buffer = query.new_zeros([1, bev_h * bev_w, self.embed_dims])
+            query_buffer[:, kwargs['frame_cache']['active_bev_idxs'], :] = query
+            return query_buffer
 
         return query
 

@@ -181,6 +181,10 @@ class TemporalSelfAttention(BaseModule):
 
             # value = torch.cat([query, query], 0)
 
+        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+            query = query[:, kwargs['frame_cache']['active_bev_idxs'], :]
+            query_pos = query_pos[:, kwargs['frame_cache']['active_bev_idxs'], :]
+
         if identity is None:
             identity = query
         if query_pos is not None:
@@ -194,7 +198,10 @@ class TemporalSelfAttention(BaseModule):
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
         assert self.num_bev_queue == 2
 
-        query = torch.cat([value[:bs], query], -1)
+        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+            query = torch.cat([value[:bs][:, kwargs['frame_cache']['active_bev_idxs'], :], query], -1)
+        else:
+            query = torch.cat([value[:bs], query], -1)
         value = self.value_proj(value)
 
         if key_padding_mask is not None:
@@ -224,9 +231,14 @@ class TemporalSelfAttention(BaseModule):
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.stack(
                 [spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
-            sampling_locations = reference_points[:, :, None, :, None, :] \
-                + sampling_offsets \
-                / offset_normalizer[None, None, None, :, None, :]
+            if kwargs['frame_cache']['apply_bev_queries_pruning']:
+                sampling_locations = reference_points[:, kwargs['frame_cache']['active_bev_idxs'], :, :][:, :, None, :, None, :] \
+                    + sampling_offsets \
+                    / offset_normalizer[None, None, None, :, None, :]
+            else:
+                sampling_locations = reference_points[:, :, None, :, None, :] \
+                    + sampling_offsets \
+                    / offset_normalizer[None, None, None, :, None, :]
 
         elif reference_points.shape[-1] == 4:
             sampling_locations = reference_points[:, :, None, :, None, :2] \

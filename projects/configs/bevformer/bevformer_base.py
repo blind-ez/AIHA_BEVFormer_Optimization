@@ -36,6 +36,16 @@ bev_h_ = 200
 bev_w_ = 200
 queue_length = 4 # each sequence contains `queue_length` frames.
 
+# set runtime options
+from datetime import datetime
+runtime_options = dict(
+    oracle_test=True,
+    prune_bev_queries=True,
+    padding_radius=6.0,
+    record_num_queries=True,
+    num_queries_log_path=f"log/num_queries/num_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+)
+
 model = dict(
     type='BEVFormer',
     use_grid_mask=True,
@@ -159,6 +169,8 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
+model.update(runtime_options=runtime_options)
+
 dataset_type = 'CustomNuScenesDataset'
 data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
@@ -193,6 +205,10 @@ test_pipeline = [
             dict(type='CustomCollect3D', keys=['img'])
         ])
 ]
+
+if runtime_options['oracle_test']:
+    test_pipeline.insert(0, dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False))
+    test_pipeline[-1]['transforms'][-1]['keys'].extend(['gt_bboxes_3d', 'gt_labels_3d'])
 
 data = dict(
     samples_per_gpu=1,

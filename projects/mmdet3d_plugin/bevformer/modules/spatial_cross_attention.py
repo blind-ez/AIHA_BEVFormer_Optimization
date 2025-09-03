@@ -120,6 +120,10 @@ class SpatialCrossAttention(BaseModule):
              Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
 
+        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+            reference_points_cam = reference_points_cam[:, :, kwargs['frame_cache']['active_bev_idxs'], :, :]
+            bev_mask = bev_mask[:, :, kwargs['frame_cache']['active_bev_idxs'], :]
+
         if key is None:
             key = query
         if value is None:
@@ -139,6 +143,8 @@ class SpatialCrossAttention(BaseModule):
             index_query_per_img = mask_per_img[0].sum(-1).nonzero().squeeze(-1)
             indexes.append(index_query_per_img)
         max_len = max([len(each) for each in indexes])
+        if kwargs['runtime_options']['record_num_queries']:
+            kwargs['frame_cache']['num_queries'].update(cross_attn=max_len)
 
         # each camera only interacts with its corresponding BEV queries. This step can  greatly save GPU memory.
         queries_rebatch = query.new_zeros(
