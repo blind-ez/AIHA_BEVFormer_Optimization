@@ -34,7 +34,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
             `LN`.
     """
 
-    def __init__(self, *args, pc_range=None, num_points_in_pillar=4, return_intermediate=False, padding_radius=None, dataset_type='nuscenes',
+    def __init__(self, *args, pc_range=None, num_points_in_pillar=4, return_intermediate=False, dataset_type='nuscenes',
                  **kwargs):
 
         super(BEVFormerEncoder, self).__init__(*args, **kwargs)
@@ -43,10 +43,6 @@ class BEVFormerEncoder(TransformerLayerSequence):
         self.num_points_in_pillar = num_points_in_pillar
         self.pc_range = pc_range
         self.fp16_enabled = False
-
-        if padding_radius is not None:
-            self.padding_offsets = generate_padding_offsets(padding_radius=padding_radius, grid_size=((self.pc_range[3] - self.pc_range[0]) / 200))
-            self.padding_offsets = self.padding_offsets.cuda()
 
     @staticmethod
     def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim='3d', bs=1, device='cuda', dtype=torch.float):
@@ -220,22 +216,24 @@ class BEVFormerEncoder(TransformerLayerSequence):
             ref_bev_coords_list = list()
             if kwargs['runtime_options']['prune_based_on_gt']:
                 ref_bev_coords = gt_bbox_centers_to_bev_coords(gt_bboxes=kwargs['gt_bboxes_3d'][0][0], gt_labels=kwargs['gt_labels_3d'][0][0], bev_h=bev_h, bev_w=bev_w)
-                ref_bev_coords = ref_bev_coords.cuda()
-                ref_bev_coords_list.append(ref_bev_coords)
+                ref_bev_coords = ref_bev_coords.to(bev_query.device)
+                if len(ref_bev_coords) != 0:
+                    ref_bev_coords_list.append(ref_bev_coords)
 
             if kwargs['runtime_options']['prune_based_on_prev_preds'] and 'predicted_bbox_centers' in kwargs['frame_cache']:
-                ref_bev_coords = lidar_coords_to_bev_coords(kwargs['frame_cache']['predicted_bbox_centers'], bev_h, bev_w)
+                ref_bev_coords = lidar_coords_to_bev_coords(lidar_coords=kwargs['frame_cache']['predicted_bbox_centers'], bev_h=bev_h, bev_w=bev_w)
+                ref_bev_coords = ref_bev_coords.to(bev_query.device)
                 if len(ref_bev_coords) != 0:
                     ref_bev_coords_list.append(ref_bev_coords)
 
             if kwargs['runtime_options']['prune_based_on_heatmap'] and 'object_like_coords' in kwargs['frame_cache']:
                 ref_bev_coords = kwargs['frame_cache']['object_like_coords']
+                ref_bev_coords = ref_bev_coords.to(bev_query.device)
                 if len(ref_bev_coords) != 0:
                     ref_bev_coords_list.append(ref_bev_coords)
 
-            if len(ref_bev_coords_list) == 0:
-                kwargs['frame_cache'].update(apply_pruning_this_frame=False)
-            else:
+            if len(ref_bev_coords_list) != 0:
+                '''
                 if kwargs['runtime_options']['fixed_bev_boundary_selection']:
                     front_width = kwargs['runtime_options']['front_width']
                     other_width = kwargs['runtime_options']['other_width']
@@ -266,36 +264,39 @@ class BEVFormerEncoder(TransformerLayerSequence):
                         boundary_coords = forward_boundary_coords.cuda()
 
                     ref_bev_coords_list.append(boundary_coords)
+                '''
+
+                if not hasattr(self, 'padding_offsets'):
+                    self.padding_offsets = generate_padding_offsets(padding_radius=kwargs['runtime_options']['padding_radius'], voxel_size=((self.pc_range[3] - self.pc_range[0]) / bev_w))
+                    self.padding_offsets = self.padding_offsets.to(bev_query.device)
 
                 padded_bev_coords = pad_ref_bev_coords(ref_bev_coords=torch.cat(ref_bev_coords_list, dim=0), padding_offsets=self.padding_offsets, bev_h=bev_h, bev_w=bev_w)
 
                 active_bev_idxs = (padded_bev_coords[:, 1] * bev_w) + padded_bev_coords[:, 0]
 
                 if len(active_bev_idxs) != 0:
-                    kwargs['frame_cache'].update(apply_pruning_this_frame=True)
                     kwargs['frame_cache'].update(active_bev_idxs=active_bev_idxs)
-                else:
-                    kwargs['frame_cache'].update(apply_pruning_this_frame=False)
+                    kwargs['frame_cache'].update(apply_pruning_this_frame=True)
 
         if kwargs['frame_cache']['apply_pruning_this_frame']:
             reference_points_cam = reference_points_cam[:, :, kwargs['frame_cache']['active_bev_idxs'], :, :]
             bev_mask = bev_mask[:, :, kwargs['frame_cache']['active_bev_idxs'], :]
 
-        if kwargs['runtime_options']['prune_values']:
-            value_mask = build_value_mask_with_single_column_padding(reference_points_cam, bev_mask, spatial_shapes)
-            kwargs['frame_cache'].update(value_mask=value_mask)
+            if kwargs['runtime_options']['prune_values_in_encoder']:
+                value_mask = build_value_mask_with_single_column_padding(reference_points_cam, bev_mask, spatial_shapes)
+                kwargs['frame_cache'].update(value_mask=value_mask)
 
         if kwargs['runtime_options']['count_num_qvs_every_frame']:
             kwargs['frame_cache'].update(num_qvs=dict())
-            if kwargs['runtime_options']['prune_bev_queries'] and kwargs['frame_cache']['apply_pruning_this_frame']:
+            if kwargs['frame_cache']['apply_pruning_this_frame']:
                 kwargs['frame_cache']['num_qvs'].update(self_attn_q=len(kwargs['frame_cache']['active_bev_idxs']))
+                if kwargs['runtime_options']['prune_values_in_encoder']:
+                    kwargs['frame_cache']['num_qvs'].update(v=kwargs['frame_cache']['value_mask'].sum().item())
+                else:
+                    kwargs['frame_cache']['num_qvs'].update(v=6*30825)
             else:
-                kwargs['frame_cache']['num_qvs'].update(self_attn_q=40000)
-
-            if kwargs['runtime_options']['prune_values']:
-                kwargs['frame_cache']['num_qvs'].update(v=kwargs['frame_cache']['value_mask'].sum().item())
-            else:
-                kwargs['frame_cache']['num_qvs'].update(v=184950)
+                kwargs['frame_cache']['num_qvs'].update(self_attn_q=200*200)
+                kwargs['frame_cache']['num_qvs'].update(v=6*30825)
 
         for lid, layer in enumerate(self.layers):
             output = layer(
@@ -494,9 +495,9 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
                 ffn_index += 1
 
         if kwargs['frame_cache']['apply_pruning_this_frame']:
-            query_buffer = query.new_zeros([1, bev_h * bev_w, self.embed_dims])
-            query_buffer[:, kwargs['frame_cache']['active_bev_idxs'], :] = query
-            return query_buffer
+            new_query = query.new_zeros([1, bev_h * bev_w, self.embed_dims])
+            new_query[:, kwargs['frame_cache']['active_bev_idxs'], :] = query
+            return new_query
 
         return query
 

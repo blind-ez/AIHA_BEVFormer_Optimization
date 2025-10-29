@@ -275,6 +275,8 @@ class BEVFormer(MVXTwoStageDetector):
         kwargs.update(runtime_options=self.runtime_options)
         kwargs.update(frame_cache=dict())
 
+        kwargs['frame_cache'].update(apply_pruning_this_frame=False)
+
         if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_prev_preds']:
             if self.sample_idx != 0 and len(self.prev_frame_info['prev_bbox_preds']) != 0:
                 kwargs['frame_cache'].update(prev_bbox_preds=self.prev_frame_info['prev_bbox_preds'])

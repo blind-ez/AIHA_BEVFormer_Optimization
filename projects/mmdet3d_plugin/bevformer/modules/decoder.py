@@ -292,7 +292,13 @@ class CustomMSDeformableAttention(BaseModule):
         bs, num_value, _ = value.shape
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
 
-        value = self.value_proj(value)
+        if kwargs['runtime_options']['prune_values_in_decoder'] and kwargs['frame_cache']['apply_pruning_this_frame']:
+            value_mask = kwargs['frame_cache']['active_bev_idxs']
+            new_value = torch.zeros_like(value)
+            new_value[0, value_mask] = self.value_proj(value[0, value_mask])
+            value = new_value
+        else:
+            value = self.value_proj(value)
         if key_padding_mask is not None:
             value = value.masked_fill(key_padding_mask[..., None], 0.0)
         value = value.view(bs, num_value, self.num_heads, -1)

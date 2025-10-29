@@ -44,11 +44,12 @@ runtime_options = dict(
     prune_based_on_prev_preds=True,
     prune_based_on_heatmap=True,
     score_threshold=0.10,
-    fixed_bev_boundary_selection=False,
-    front_width=10,
-    other_width=0,
+    # fixed_bev_boundary_selection=False,
+    # front_width=10,
+    # other_width=0,
     padding_radius=6.0,
-    prune_values=True,
+    prune_values_in_encoder=True,
+    prune_values_in_decoder=True,
     count_num_qvs_every_frame=False,
     num_qvs_log_path='log/num_qvs/num_qvs.txt'
  )
@@ -177,9 +178,6 @@ model = dict(
             pc_range=point_cloud_range))))
 
 model.update(runtime_options=runtime_options)
-
-if runtime_options['prune_bev_queries']:
-    model['pts_bbox_head']['transformer']['encoder'].update(padding_radius=runtime_options['padding_radius'])
 
 if runtime_options['prune_based_on_heatmap']:
     from projects.configs.heatbev.heatbev import model as m

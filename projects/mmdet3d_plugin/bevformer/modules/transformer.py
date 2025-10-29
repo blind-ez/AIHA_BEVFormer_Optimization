@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.init import normal_
-from torchvision.transforms.functional import rotate
+from torchvision.transforms.functional import InterpolationMode, rotate
 
 from mmcv.cnn import xavier_init
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
@@ -148,7 +148,7 @@ class PerceptionTransformer(BaseModule):
             if 'prev_bbox_preds' in kwargs['frame_cache']:
                 predicted_bbox_centers = predict_bbox_center_from_vel(
                     prev_preds=kwargs['frame_cache']['prev_bbox_preds'],
-                    ego_yaw=kwargs['img_metas'][0]['can_bus'][-1] / 180 * np.pi,
+                    ego_yaw=kwargs['img_metas'][0]['can_bus'][-1] * (np.pi / 180),
                     ego_shift=shift * bev_w * grid_length_x
                 )
                 kwargs['frame_cache'].update(predicted_bbox_centers=predicted_bbox_centers)
@@ -163,7 +163,7 @@ class PerceptionTransformer(BaseModule):
                     tmp_prev_bev = prev_bev[:, i].reshape(
                         bev_h, bev_w, -1).permute(2, 0, 1)
                     tmp_prev_bev = rotate(tmp_prev_bev, rotation_angle,
-                                          center=self.rotate_center)
+                                          center=self.rotate_center, interpolation=InterpolationMode.BILINEAR)
                     tmp_prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(
                         bev_h * bev_w, 1, -1)
                     prev_bev[:, i] = tmp_prev_bev[:, 0]

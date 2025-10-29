@@ -333,7 +333,7 @@ class MSDeformableAttention3D(BaseModule):
         bs, num_value, _ = value.shape
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
 
-        if kwargs['runtime_options']['prune_values']:
+        if kwargs['runtime_options']['prune_values_in_encoder'] and kwargs['frame_cache']['apply_pruning_this_frame']:
             value_mask = kwargs['frame_cache']['value_mask']
             new_value = torch.zeros_like(value)
             new_value[value_mask] = self.value_proj(value[value_mask])
