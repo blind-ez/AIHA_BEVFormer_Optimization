@@ -14,10 +14,11 @@ import torch
 from mmcv.cnn.bricks.registry import ATTENTION, TRANSFORMER_LAYER, TRANSFORMER_LAYER_SEQUENCE
 from mmcv.cnn.bricks.transformer import TransformerLayerSequence
 from mmcv.runner import auto_fp16, force_fp32
-from mmcv.utils import digit_version, ext_loader, TORCH_VERSION
+from mmcv.utils import digit_version, TORCH_VERSION
 
 from .custom_base_transformer_layer import MyCustomBaseTransformerLayer
 
+from custom_modules.build_value_mask import build_value_mask_with_single_column_padding
 from custom_modules.coord_utils import generate_padding_offsets, gt_bbox_centers_to_bev_coords, lidar_coords_to_bev_coords, pad_ref_bev_coords
 
 
@@ -276,12 +277,25 @@ class BEVFormerEncoder(TransformerLayerSequence):
                 else:
                     kwargs['frame_cache'].update(apply_pruning_this_frame=False)
 
-        if kwargs['runtime_options']['record_num_queries']:
-            kwargs['frame_cache'].update(num_queries=dict())
+        if kwargs['frame_cache']['apply_pruning_this_frame']:
+            reference_points_cam = reference_points_cam[:, :, kwargs['frame_cache']['active_bev_idxs'], :, :]
+            bev_mask = bev_mask[:, :, kwargs['frame_cache']['active_bev_idxs'], :]
+
+        if kwargs['runtime_options']['prune_values']:
+            value_mask = build_value_mask_with_single_column_padding(reference_points_cam, bev_mask, spatial_shapes)
+            kwargs['frame_cache'].update(value_mask=value_mask)
+
+        if kwargs['runtime_options']['count_num_qvs_every_frame']:
+            kwargs['frame_cache'].update(num_qvs=dict())
             if kwargs['runtime_options']['prune_bev_queries'] and kwargs['frame_cache']['apply_pruning_this_frame']:
-                kwargs['frame_cache']['num_queries'].update(self_attn=len(kwargs['frame_cache']['active_bev_idxs']))
+                kwargs['frame_cache']['num_qvs'].update(self_attn_q=len(kwargs['frame_cache']['active_bev_idxs']))
             else:
-                kwargs['frame_cache']['num_queries'].update(self_attn=40000)
+                kwargs['frame_cache']['num_qvs'].update(self_attn_q=40000)
+
+            if kwargs['runtime_options']['prune_values']:
+                kwargs['frame_cache']['num_qvs'].update(v=kwargs['frame_cache']['value_mask'].sum().item())
+            else:
+                kwargs['frame_cache']['num_qvs'].update(v=184950)
 
         for lid, layer in enumerate(self.layers):
             output = layer(
@@ -305,9 +319,9 @@ class BEVFormerEncoder(TransformerLayerSequence):
             if self.return_intermediate:
                 intermediate.append(output)
 
-        if kwargs['runtime_options']['record_num_queries']:
-            with open(kwargs['runtime_options']['num_queries_log_path'], 'a') as f:
-                f.write(f"{kwargs['frame_cache']['num_queries']['self_attn']}\t{kwargs['frame_cache']['num_queries']['cross_attn']}\n")
+        if kwargs['runtime_options']['count_num_qvs_every_frame']:
+            with open(kwargs['runtime_options']['num_qvs_log_path'], 'a') as f:
+                f.write(f"{kwargs['frame_cache']['num_qvs']['self_attn_q']}\t{kwargs['frame_cache']['num_qvs']['cross_attn_q']}\t{kwargs['frame_cache']['num_qvs']['v']}\n")
 
         if self.return_intermediate:
             return torch.stack(intermediate)

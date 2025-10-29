@@ -38,18 +38,20 @@ queue_length = 4 # each sequence contains `queue_length` frames.
 
 # set runtime options
 runtime_options = dict(
+    run_backbone_fp16=True,
     prune_bev_queries=True,
     prune_based_on_gt=False,
     prune_based_on_prev_preds=True,
     prune_based_on_heatmap=True,
+    score_threshold=0.10,
     fixed_bev_boundary_selection=False,
     front_width=10,
     other_width=0,
-    score_threshold=0.10,
     padding_radius=6.0,
-    record_num_queries=True,
-    num_queries_log_path="log/num_queries/num_queries.txt"
-)
+    prune_values=True,
+    count_num_qvs_every_frame=False,
+    num_qvs_log_path='log/num_qvs/num_qvs.txt'
+ )
 
 model = dict(
     type='BEVFormer',

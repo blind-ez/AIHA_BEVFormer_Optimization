@@ -4,21 +4,19 @@
 #  Modified by Zhiqi Li
 # ---------------------------------------------
 
-import time
 import copy
+
 import numpy as np
 import torch
 
-from mmcv.runner import force_fp32, auto_fp16
+from mmcv.runner import auto_fp16
 from mmdet.models import DETECTORS
-from mmdet3d import core as mmdet3d_core
 from mmdet3d.core import bbox3d2result
 from mmdet3d.models import builder
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
+from torch.cuda.amp import autocast
 
 from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
-from projects.mmdet3d_plugin.models.utils.bricks import run_time
-
 from custom_modules.bbox_utils import denormalize_bbox
 from custom_modules.coord_utils import lidar_coords_to_bev_coords
 
@@ -324,7 +322,13 @@ class BEVFormer(MVXTwoStageDetector):
 
     def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False, **kwargs):
         """Test function without augmentaiton."""
-        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+        if self.runtime_options['run_backbone_fp16']:
+            with autocast():
+                img_feats = self.extract_feat(img=img, img_metas=img_metas)
+                for i, feat in enumerate(img_feats):
+                    img_feats[i] = feat.float()
+        else:
+            img_feats = self.extract_feat(img=img, img_metas=img_metas)
 
         if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_heatmap']:
             if self.sample_idx == 0:

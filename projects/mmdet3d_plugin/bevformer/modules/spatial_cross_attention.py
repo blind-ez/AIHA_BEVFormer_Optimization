@@ -120,10 +120,6 @@ class SpatialCrossAttention(BaseModule):
              Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
 
-        if kwargs['frame_cache']['apply_pruning_this_frame']:
-            reference_points_cam = reference_points_cam[:, :, kwargs['frame_cache']['active_bev_idxs'], :, :]
-            bev_mask = bev_mask[:, :, kwargs['frame_cache']['active_bev_idxs'], :]
-
         if key is None:
             key = query
         if value is None:
@@ -143,8 +139,8 @@ class SpatialCrossAttention(BaseModule):
             index_query_per_img = mask_per_img[0].sum(-1).nonzero().squeeze(-1)
             indexes.append(index_query_per_img)
         max_len = max([len(each) for each in indexes])
-        if kwargs['runtime_options']['record_num_queries']:
-            kwargs['frame_cache']['num_queries'].update(cross_attn=max_len)
+        if kwargs['runtime_options']['count_num_qvs_every_frame']:
+            kwargs['frame_cache']['num_qvs'].update(cross_attn_q=max_len)
 
         # each camera only interacts with its corresponding BEV queries. This step can  greatly save GPU memory.
         queries_rebatch = query.new_zeros(
@@ -167,7 +163,7 @@ class SpatialCrossAttention(BaseModule):
 
         queries = self.deformable_attention(query=queries_rebatch.view(bs*self.num_cams, max_len, self.embed_dims), key=key, value=value,
                                             reference_points=reference_points_rebatch.view(bs*self.num_cams, max_len, D, 2), spatial_shapes=spatial_shapes,
-                                            level_start_index=level_start_index).view(bs, self.num_cams, max_len, self.embed_dims)
+                                            level_start_index=level_start_index, **kwargs).view(bs, self.num_cams, max_len, self.embed_dims)
         for j in range(bs):
             for i, index_query_per_img in enumerate(indexes):
                 slots[j, index_query_per_img] += queries[j, i, :len(index_query_per_img)]
@@ -337,7 +333,13 @@ class MSDeformableAttention3D(BaseModule):
         bs, num_value, _ = value.shape
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
 
-        value = self.value_proj(value)
+        if kwargs['runtime_options']['prune_values']:
+            value_mask = kwargs['frame_cache']['value_mask']
+            new_value = torch.zeros_like(value)
+            new_value[value_mask] = self.value_proj(value[value_mask])
+            value = new_value
+        else:
+            value = self.value_proj(value)
         if key_padding_mask is not None:
             value = value.masked_fill(key_padding_mask[..., None], 0.0)
         value = value.view(bs, num_value, self.num_heads, -1)
