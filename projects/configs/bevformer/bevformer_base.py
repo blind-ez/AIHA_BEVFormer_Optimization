@@ -181,8 +181,7 @@ model.update(runtime_options=runtime_options)
 
 if runtime_options['prune_based_on_heatmap']:
     from projects.configs.heatbev.heatbev import model as m
-    model.update(bev_heatmap_head=m['bev_heatmap_head'])
-    runtime_options.update(temporal_window=m['bev_heatmap_head']['object_query_decoder']['transformerlayers']['attn_cfg'][0]['num_frames'])
+    model.update(heatmap_head=m['heatmap_head'])
 
 dataset_type = 'CustomNuScenesDataset'
 data_root = 'data/nuscenes/'
