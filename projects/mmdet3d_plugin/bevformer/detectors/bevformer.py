@@ -13,6 +13,7 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmdet.models import DETECTORS
 from mmdet3d import core as mmdet3d_core
 from mmdet3d.core import bbox3d2result
+from mmdet3d.models import builder
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 
 from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
@@ -38,6 +39,7 @@ class BEVFormer(MVXTwoStageDetector):
                  img_backbone=None,
                  pts_backbone=None,
                  img_neck=None,
+                 bev_heatmap_head=None,
                  pts_neck=None,
                  pts_bbox_head=None,
                  img_roi_head=None,
@@ -70,6 +72,8 @@ class BEVFormer(MVXTwoStageDetector):
         }
 
         self.runtime_options = runtime_options
+
+        self.bev_heatmap_head = builder.build_head(bev_heatmap_head) if bev_heatmap_head is not None else None
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
@@ -273,14 +277,8 @@ class BEVFormer(MVXTwoStageDetector):
         kwargs.update(runtime_options=self.runtime_options)
         kwargs.update(frame_cache=dict())
 
-        if self.runtime_options['prune_bev_queries']:
-            assert self.runtime_options['prune_based_on_gt'] != self.runtime_options['prune_based_on_prev_preds']
-
         if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_prev_preds']:
-            if self.sample_idx == 0 or len(self.prev_frame_info['prev_bbox_preds']) == 0:
-                kwargs['frame_cache'].update(apply_pruning_this_frame=False)
-            else:
-                kwargs['frame_cache'].update(apply_pruning_this_frame=True)
+            if self.sample_idx != 0 and len(self.prev_frame_info['prev_bbox_preds']) != 0:
                 kwargs['frame_cache'].update(prev_bbox_preds=self.prev_frame_info['prev_bbox_preds'])
 
         outs, bbox_results = self.simple_test(
@@ -327,6 +325,11 @@ class BEVFormer(MVXTwoStageDetector):
     def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False, **kwargs):
         """Test function without augmentaiton."""
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
+
+        if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_heatmap']:
+            object_like_coords = self.bev_heatmap_head.forward_test(img_feats, img_metas, self.runtime_options['object_score_threshold'], self.runtime_options['mask_score_threshold'])
+            if object_like_coords is not None:
+                kwargs['frame_cache'].update(object_like_coords=object_like_coords)
 
         bbox_list = [dict() for i in range(len(img_metas))]
         outs, bbox_pts = self.simple_test_pts(

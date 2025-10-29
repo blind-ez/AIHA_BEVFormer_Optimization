@@ -496,7 +496,7 @@ class BEVFormerHead(DETRHead):
             list[dict]: Decoded bbox, scores and labels after nms.
         """
 
-        if kwargs['frame_cache']['apply_pruning_this_frame']:
+        if kwargs['runtime_options']['prune_bev_queries'] and kwargs['frame_cache']['apply_pruning_this_frame']:
             bboxes = preds_dicts['all_bbox_preds'][-1, 0]
             scores = preds_dicts['all_cls_scores'][-1, 0]
 

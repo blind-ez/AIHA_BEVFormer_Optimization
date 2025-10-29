@@ -145,13 +145,13 @@ class PerceptionTransformer(BaseModule):
             [shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
 
         if kwargs['runtime_options']['prune_bev_queries'] and kwargs['runtime_options']['prune_based_on_prev_preds']:
-            if kwargs['frame_cache']['apply_pruning_this_frame']:
+            if 'prev_bbox_preds' in kwargs['frame_cache']:
                 predicted_bbox_centers = predict_bbox_center_from_vel(
                     prev_preds=kwargs['frame_cache']['prev_bbox_preds'],
                     ego_yaw=kwargs['img_metas'][0]['can_bus'][-1] / 180 * np.pi,
                     ego_shift=shift * bev_w * grid_length_x
                 )
-                kwargs['frame_cache'].update(ref_lidar_coords=predicted_bbox_centers)
+                kwargs['frame_cache'].update(predicted_bbox_centers=predicted_bbox_centers)
 
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:

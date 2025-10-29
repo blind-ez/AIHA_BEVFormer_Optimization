@@ -33,7 +33,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
             `LN`.
     """
 
-    def __init__(self, *args, pc_range=None, num_points_in_pillar=4, return_intermediate=False, dataset_type='nuscenes',
+    def __init__(self, *args, pc_range=None, num_points_in_pillar=4, return_intermediate=False, padding_radius=None, dataset_type='nuscenes',
                  **kwargs):
 
         super(BEVFormerEncoder, self).__init__(*args, **kwargs)
@@ -42,6 +42,10 @@ class BEVFormerEncoder(TransformerLayerSequence):
         self.num_points_in_pillar = num_points_in_pillar
         self.pc_range = pc_range
         self.fp16_enabled = False
+
+        if padding_radius is not None:
+            self.padding_offsets = generate_padding_offsets(padding_radius=padding_radius, grid_size=((self.pc_range[3] - self.pc_range[0]) / 200))
+            self.padding_offsets = self.padding_offsets.cuda()
 
     @staticmethod
     def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim='3d', bs=1, device='cuda', dtype=torch.float):
@@ -212,43 +216,39 @@ class BEVFormerEncoder(TransformerLayerSequence):
                 bs*2, len_bev, num_bev_level, 2)
 
         if kwargs['runtime_options']['prune_bev_queries']:
+            ref_bev_coords_list = list()
             if kwargs['runtime_options']['prune_based_on_gt']:
                 ref_bev_coords = gt_bbox_centers_to_bev_coords(gt_bboxes=kwargs['gt_bboxes_3d'][0][0], gt_labels=kwargs['gt_labels_3d'][0][0], bev_h=bev_h, bev_w=bev_w)
                 ref_bev_coords = ref_bev_coords.cuda()
+                ref_bev_coords_list.append(ref_bev_coords)
 
-                padding_offsets = generate_padding_offsets(padding_radius=kwargs['runtime_options']['padding_radius'], grid_size=((self.pc_range[3] - self.pc_range[0]) / bev_w))
-                padding_offsets = padding_offsets.cuda()
+            if kwargs['runtime_options']['prune_based_on_prev_preds'] and 'predicted_bbox_centers' in kwargs['frame_cache']:
+                ref_bev_coords = lidar_coords_to_bev_coords(kwargs['frame_cache']['predicted_bbox_centers'], bev_h, bev_w)
+                if len(ref_bev_coords) != 0:
+                    ref_bev_coords_list.append(ref_bev_coords)
 
-                padded_bev_coords = pad_ref_bev_coords(ref_bev_coords=ref_bev_coords, padding_offsets=padding_offsets, bev_h=bev_h, bev_w=bev_w)
+            if kwargs['runtime_options']['prune_based_on_heatmap'] and 'object_like_coords' in kwargs['frame_cache']:
+                ref_bev_coords = kwargs['frame_cache']['object_like_coords']
+                if len(ref_bev_coords) != 0:
+                    ref_bev_coords_list.append(ref_bev_coords)
+
+            if len(ref_bev_coords_list) == 0:
+                kwargs['frame_cache'].update(apply_pruning_this_frame=False)
+            else:
+                padded_bev_coords = pad_ref_bev_coords(ref_bev_coords=torch.cat(ref_bev_coords_list, dim=0), padding_offsets=self.padding_offsets, bev_h=bev_h, bev_w=bev_w)
 
                 active_bev_idxs = (padded_bev_coords[:, 1] * bev_w) + padded_bev_coords[:, 0]
 
-                kwargs['frame_cache'].update(active_bev_idxs=active_bev_idxs)
-
-                if len(active_bev_idxs) == 0:
-                    kwargs['frame_cache'].update(apply_pruning_this_frame=False)
-                else:
+                if len(active_bev_idxs) != 0:
                     kwargs['frame_cache'].update(apply_pruning_this_frame=True)
-            else:
-                if kwargs['frame_cache']['apply_pruning_this_frame']:
-                    ref_bev_coords = lidar_coords_to_bev_coords(kwargs['frame_cache']['ref_lidar_coords'], bev_h, bev_w)
-
-                    padding_offsets = generate_padding_offsets(padding_radius=kwargs['runtime_options']['padding_radius'], grid_size=((self.pc_range[3] - self.pc_range[0]) / bev_w))
-                    padding_offsets = padding_offsets.cuda()
-
-                    padded_bev_coords = pad_ref_bev_coords(ref_bev_coords=ref_bev_coords, padding_offsets=padding_offsets, bev_h=bev_h, bev_w=bev_w)
-
-                    active_bev_idxs = (padded_bev_coords[:, 1] * bev_w) + padded_bev_coords[:, 0]
-
                     kwargs['frame_cache'].update(active_bev_idxs=active_bev_idxs)
-
-                    if len(active_bev_idxs) == 0:
-                        kwargs['frame_cache'].update(apply_pruning_this_frame=False)
+                else:
+                    kwargs['frame_cache'].update(apply_pruning_this_frame=False)
 
         if kwargs['runtime_options']['record_num_queries']:
             kwargs['frame_cache'].update(num_queries=dict())
-            if kwargs['frame_cache']['apply_pruning_this_frame']:
-                kwargs['frame_cache']['num_queries'].update(self_attn=len(active_bev_idxs))
+            if kwargs['runtime_options']['prune_bev_queries'] and kwargs['frame_cache']['apply_pruning_this_frame']:
+                kwargs['frame_cache']['num_queries'].update(self_attn=len(kwargs['frame_cache']['active_bev_idxs']))
             else:
                 kwargs['frame_cache']['num_queries'].update(self_attn=40000)
 
