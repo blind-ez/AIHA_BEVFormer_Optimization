@@ -154,6 +154,7 @@ class CustomNuScenesDatasetV2(NuScenesDataset):
             prev=info['prev'],
             next=info['next'],
             scene_token=info['scene_token'],
+            can_bus=info['can_bus'],
             frame_idx=info['frame_idx'],
             timestamp=info['timestamp'] / 1e6,
         )
@@ -188,6 +189,17 @@ class CustomNuScenesDatasetV2(NuScenesDataset):
                     cam2img=cam_intrinsics,
                     lidar2cam=lidar2cam_rts,
                 ))
+
+        rotation = Quaternion(input_dict['ego2global_rotation'])
+        translation = input_dict['ego2global_translation']
+        can_bus = input_dict['can_bus']
+        can_bus[:3] = translation
+        can_bus[3:7] = rotation
+        patch_angle = quaternion_yaw(rotation) / np.pi * 180
+        if patch_angle < 0:
+            patch_angle += 360
+        can_bus[-2] = patch_angle / 180 * np.pi
+        can_bus[-1] = patch_angle
 
         return input_dict
 

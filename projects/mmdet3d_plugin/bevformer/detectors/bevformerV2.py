@@ -5,13 +5,20 @@
 # ---------------------------------------------
 
 import copy
-from collections import OrderedDict
+
+import numpy as np
 import torch
+
+from collections import OrderedDict
 from mmdet.models import DETECTORS
 from mmdet3d.core import bbox3d2result
-from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 from mmdet3d.models.builder import build_head
+from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
+from torch.cuda.amp import autocast
+
 from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
+from custom_modules.bbox_utils import denormalize_bbox, predict_bbox_center_from_vel
+from custom_modules.coord_utils import lidar_coords_to_bev_coords
 
 
 @DETECTORS.register_module()
@@ -30,6 +37,7 @@ class BEVFormerV2(MVXTwoStageDetector):
                  img_backbone=None,
                  pts_backbone=None,
                  img_neck=None,
+                 heatmap_head=None,
                  pts_neck=None,
                  pts_bbox_head=None,
                  fcos3d_bbox_head=None,
@@ -43,6 +51,7 @@ class BEVFormerV2(MVXTwoStageDetector):
                  num_mono_levels=None,
                  mono_loss_weight=1.0,
                  frames=(0,),
+                 runtime_options=None
                  ):
 
         super(BEVFormerV2,
@@ -69,6 +78,29 @@ class BEVFormerV2(MVXTwoStageDetector):
         self.num_levels = num_levels
         self.num_mono_levels = num_mono_levels
         self.frames = frames
+
+        self.runtime_options = runtime_options
+
+        self.heatmap_head = build_head(heatmap_head) if heatmap_head is not None else None
+
+        self.prev_frame_info = {
+            'scene_token': None,
+            'prev_pos': 0,
+            'prev_angle': 0,
+        }
+
+    def get_bev_shift_from_ego_motion(self, img_metas, grid_length=[0.512, 0.512], bev_size=[200, 200]):
+        delta_x = np.array([each['can_bus'][0] for each in img_metas])
+        delta_y = np.array([each['can_bus'][1] for each in img_metas])
+        translation_length = np.sqrt(delta_x ** 2 + delta_y ** 2)
+        translation_angle = np.arctan2(delta_y, delta_x) * (180 / np.pi)
+        ego_angle = np.array([each['can_bus'][-2] * (180 / np.pi) for each in img_metas])
+        bev_angle = ego_angle - translation_angle
+        shift_x = translation_length * np.sin(bev_angle * (np.pi / 180)) / grid_length[1] / bev_size[1]
+        shift_y = translation_length * np.cos(bev_angle * (np.pi / 180)) / grid_length[0] / bev_size[0]
+        shift = torch.tensor([shift_x, shift_y]).transpose(1, 0)
+        return shift
+
     def extract_img_feat(self, img):
         """Extract features of images."""
         B = img.size(0)
@@ -162,7 +194,7 @@ class BEVFormerV2(MVXTwoStageDetector):
         else:
             return self.forward_test(**kwargs)
 
-    def obtain_history_bev(self, img_dict, img_metas_dict):
+    def obtain_history_bev(self, img_dict, img_metas_dict, **kwargs):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated.
         """
         # Modify: roll back to previous version for single frame
@@ -173,11 +205,19 @@ class BEVFormerV2(MVXTwoStageDetector):
             for t in img_dict.keys():
                 img = img_dict[t]
                 img_metas = [img_metas_dict[t], ]
-                img_feats = self.extract_feat(img=img, img_metas=img_metas)
+
+                if self.runtime_options['run_backbone_fp16']:
+                    with autocast():
+                        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+                        for i, feat in enumerate(img_feats):
+                            img_feats[i] = feat.float()
+                else:
+                    img_feats = self.extract_feat(img=img, img_metas=img_metas)
+
                 if self.num_levels:
                     img_feats = img_feats[:self.num_levels]
                 bev = self.pts_bbox_head(
-                    img_feats, img_metas, None, only_bev=True)
+                    img_feats, img_metas, prev_bev=None, only_bev=True, **kwargs)
                 prev_bev[t] = bev.detach()
         if is_training:
             self.train()
@@ -229,20 +269,72 @@ class BEVFormerV2(MVXTwoStageDetector):
                 raise TypeError('{} must be a list, but got {}'.format(
                     name, type(var)))
         img = [img] if img is None else img
-        new_prev_bev, bbox_results = self.simple_test(img_metas[0], img[0], prev_bev=None, **kwargs)
+
+        if img_metas[0][0][0]['scene_token'] != self.prev_frame_info['scene_token']:
+            # the first sample of each scene is truncated
+            self.sample_idx = 0
+        else:
+            self.sample_idx += 1
+        # update idx
+        self.prev_frame_info['scene_token'] = img_metas[0][0][0]['scene_token']
+
+        tmp_pos = copy.deepcopy(img_metas[0][0][0]['can_bus'][:3])
+        tmp_angle = copy.deepcopy(img_metas[0][0][0]['can_bus'][-1])
+        if self.sample_idx != 0:
+            img_metas[0][0][0]['can_bus'][:3] -= self.prev_frame_info['prev_pos']
+            img_metas[0][0][0]['can_bus'][-1] -= self.prev_frame_info['prev_angle']
+        else:
+            img_metas[0][0][0]['can_bus'][-1] = 0
+            img_metas[0][0][0]['can_bus'][:3] = 0
+
+        kwargs.update(runtime_options=self.runtime_options)
+        kwargs.update(frame_cache=dict())
+
+        kwargs['frame_cache'].update(apply_pruning_this_frame=False)
+
+        if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_prev_preds']:
+            if self.sample_idx != 0 and len(self.prev_frame_info['prev_bbox_preds']) != 0:
+                kwargs['frame_cache'].update(prev_bbox_preds=self.prev_frame_info['prev_bbox_preds'])
+
+        outs, bbox_results = self.simple_test(img_metas[0], img[0], prev_bev=None, **kwargs)
+
+        if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_prev_preds']:
+            cls_scores = outs['all_cls_scores'][-1, 0]
+            bbox_preds = outs['all_bbox_preds'][-1, 0]
+
+            preds_mask = cls_scores.max(1).values.sigmoid() > 0.1
+            bbox_preds = bbox_preds[preds_mask]
+
+            if kwargs['frame_cache']['apply_pruning_this_frame']:
+                bbox_bev_coords = lidar_coords_to_bev_coords(bbox_preds[:, :2], bev_h=200, bev_w=200)
+                bbox_bev_idxs = (bbox_bev_coords[:, 1] * 200) + bbox_bev_coords[:, 0]
+
+                preds_mask = (bbox_bev_idxs[:, None] == kwargs['frame_cache']['active_bev_idxs'][None, :]).any(-1)
+
+                bbox_preds = bbox_preds[preds_mask]
+
+            bbox_preds = denormalize_bbox(bbox_preds)
+            bbox_preds[:, 2] = bbox_preds[:, 2] - bbox_preds[:, 5] * 0.5
+
+            self.prev_frame_info['prev_bbox_preds'] = bbox_preds
+
+        # During inference, we save the BEV features and ego motion of each timestamp.
+        self.prev_frame_info['prev_pos'] = tmp_pos
+        self.prev_frame_info['prev_angle'] = tmp_angle
+
         return bbox_results
 
-    def simple_test_pts(self, x, img_metas, prev_bev=None, rescale=False):
+    def simple_test_pts(self, x, img_metas, prev_bev=None, rescale=False, **kwargs):
         """Test function"""
-        outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev)
+        outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev, **kwargs)
 
         bbox_list = self.pts_bbox_head.get_bboxes(
-            outs, img_metas, rescale=rescale)
+            outs, img_metas, rescale=rescale, **kwargs)
         bbox_results = [
             bbox3d2result(bboxes, scores, labels)
             for bboxes, scores, labels in bbox_list
         ]
-        return outs['bev_embed'], bbox_results
+        return outs, bbox_results
 
     def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False, **kwargs):
         """Test function without augmentaiton."""
@@ -254,16 +346,39 @@ class BEVFormerV2(MVXTwoStageDetector):
         img_dict.pop(0)
 
         prev_img_metas = copy.deepcopy(img_metas)
-        prev_bev = self.obtain_history_bev(img_dict, prev_img_metas)
-
         img_metas = [img_metas[0], ]
-        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+
+        if self.runtime_options['run_backbone_fp16']:
+            with autocast():
+                img_feats = self.extract_feat(img=img, img_metas=img_metas)
+                for i, feat in enumerate(img_feats):
+                    img_feats[i] = feat.float()
+        else:
+            img_feats = self.extract_feat(img=img, img_metas=img_metas)
+
         if self.num_levels:
             img_feats = img_feats[:self.num_levels]
 
+        if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_heatmap']:
+            object_like_coords = self.heatmap_head.forward_test(img_feats, img_metas, self.runtime_options['score_threshold'])
+            if object_like_coords is not None:
+                kwargs['frame_cache'].update(object_like_coords=object_like_coords)
+
+        if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_prev_preds']:
+            if 'prev_bbox_preds' in kwargs['frame_cache']:
+                shift = self.get_bev_shift_from_ego_motion(img_metas).to(img_feats[0])
+                predicted_bbox_centers = predict_bbox_center_from_vel(
+                    prev_preds=kwargs['frame_cache']['prev_bbox_preds'],
+                    ego_yaw=img_metas[0]['can_bus'][-1] * (np.pi / 180),
+                    ego_shift=shift * 200 * 0.512
+                )
+                kwargs['frame_cache'].update(predicted_bbox_centers=predicted_bbox_centers)
+
+        prev_bev = self.obtain_history_bev(img_dict, prev_img_metas, **kwargs)
+
         bbox_list = [dict() for i in range(len(img_metas))]
-        new_prev_bev, bbox_pts = self.simple_test_pts(
-            img_feats, img_metas, prev_bev, rescale=rescale)
+        outs, bbox_pts = self.simple_test_pts(
+            img_feats, img_metas, prev_bev, rescale=rescale, **kwargs)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
-        return new_prev_bev, bbox_list
+        return outs, bbox_list

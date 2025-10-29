@@ -560,7 +560,7 @@ class BEVFormerHead_GroupDETR(BEVFormerHead):
         kwargs['num_query'] = group_detr * kwargs['num_query']
         super().__init__(*args, **kwargs)
 
-    def forward(self, mlvl_feats, img_metas, prev_bev=None,  only_bev=False):
+    def forward(self, mlvl_feats, img_metas, prev_bev=None,  only_bev=False, **kwargs):
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
         object_query_embeds = self.query_embedding.weight.to(dtype)
@@ -583,6 +583,7 @@ class BEVFormerHead_GroupDETR(BEVFormerHead):
                 bev_pos=bev_pos,
                 img_metas=img_metas,
                 prev_bev=prev_bev,
+                **kwargs
             )
         else:
             outputs = self.transformer(
@@ -597,7 +598,8 @@ class BEVFormerHead_GroupDETR(BEVFormerHead):
                 reg_branches=self.reg_branches if self.with_box_refine else None,  # noqa:E501
                 cls_branches=self.cls_branches if self.as_two_stage else None,
                 img_metas=img_metas,
-                prev_bev=prev_bev
+                prev_bev=prev_bev,
+                **kwargs
         )
 
         bev_embed, hs, init_reference, inter_references = outputs

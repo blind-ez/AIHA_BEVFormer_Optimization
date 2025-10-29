@@ -36,6 +36,24 @@ bev_h_ = 200
 bev_w_ = 200
 queue_length = 4 # each sequence contains `queue_length` frames.
 
+# set runtime options
+runtime_options = dict(
+    run_backbone_fp16=True,
+    prune_bev_queries=True,
+    prune_based_on_gt=False,
+    prune_based_on_prev_preds=True,
+    prune_based_on_heatmap=True,
+    score_threshold=0.10,
+    # fixed_bev_boundary_selection=False,
+    # front_width=10,
+    # other_width=0,
+    padding_radius=6.0,
+    prune_values_in_encoder=True,
+    prune_values_in_decoder=True,
+    count_num_qvs_every_frame=False,
+    num_qvs_log_path='log/num_qvs/num_qvs.txt'
+ )
+
 model = dict(
     type='BEVFormer',
     use_grid_mask=True,
@@ -159,6 +177,12 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
+model.update(runtime_options=runtime_options)
+
+if runtime_options['prune_based_on_heatmap']:
+    from projects.configs.heatbev.heatbev import model as m
+    model.update(heatmap_head=m['heatmap_head'])
+
 dataset_type = 'CustomNuScenesDataset'
 data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
@@ -193,6 +217,10 @@ test_pipeline = [
             dict(type='CustomCollect3D', keys=['img'])
         ])
 ]
+
+if runtime_options['prune_based_on_gt']:
+    test_pipeline.insert(0, dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False))
+    test_pipeline[-1]['transforms'][-1]['keys'].extend(['gt_bboxes_3d', 'gt_labels_3d'])
 
 data = dict(
     samples_per_gpu=1,
