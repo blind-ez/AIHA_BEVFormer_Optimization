@@ -3,16 +3,20 @@ import torch
 import torch.nn as nn
 
 from mmcv.cnn import Linear, bias_init_with_prob
+from mmcv.runner import force_fp32, auto_fp16
 from mmcv.utils import TORCH_VERSION, digit_version
-from mmdet.core import (multi_apply, multi_apply, reduce_mean)
-from mmdet.models.utils.transformer import inverse_sigmoid
+
+from mmdet.core import multi_apply, reduce_mean
 from mmdet.models import HEADS
 from mmdet.models.dense_heads import DETRHead
-from mmdet3d.core.bbox.coders import build_bbox_coder
-from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
-from mmcv.runner import force_fp32, auto_fp16
+from mmdet.models.utils.transformer import inverse_sigmoid
 
-from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
+from mmdet3d.core.bbox.coders import build_bbox_coder
+
+from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
+
+from custom_modules.bbox_utils import denormalize_bbox
+from custom_modules.coord_utils import lidar_coords_to_bev_coords
 
 
 @HEADS.register_module()
@@ -492,7 +496,7 @@ class BEVFormerHead(DETRHead):
             list[dict]: Decoded bbox, scores and labels after nms.
         """
 
-        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+        if kwargs['frame_cache']['apply_pruning_this_frame']:
             bboxes = preds_dicts['all_bbox_preds'][-1, 0]
             scores = preds_dicts['all_cls_scores'][-1, 0]
 
@@ -505,10 +509,7 @@ class BEVFormerHead(DETRHead):
             bbox_index = indexs // num_classes
             bboxes = bboxes[bbox_index]
 
-            bbox_bev_coords = bboxes.new_zeros([bboxes.shape[0], 2])
-            bbox_bev_coords[:, 0] = ((bboxes[:, 0] - self.pc_range[0]) / (self.pc_range[3] - self.pc_range[0])) * self.bev_w
-            bbox_bev_coords[:, 1] = ((bboxes[:, 1] - self.pc_range[1]) / (self.pc_range[4] - self.pc_range[1])) * self.bev_h
-            bbox_bev_coords = bbox_bev_coords.to(torch.int64)
+            bbox_bev_coords = lidar_coords_to_bev_coords(bboxes[:, :2], self.bev_h, self.bev_w)
             bbox_bev_idxs = (bbox_bev_coords[:, 1] * self.bev_w) + bbox_bev_coords[:, 0]
 
             preds_mask = (bbox_bev_idxs[:, None] == kwargs['frame_cache']['active_bev_idxs'][None, :]).any(-1)
@@ -517,7 +518,7 @@ class BEVFormerHead(DETRHead):
             scores = scores[preds_mask]
             labels = labels[preds_mask]
 
-            bboxes = denormalize_bbox(bboxes, self.pc_range)
+            bboxes = denormalize_bbox(bboxes)
             bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
             bboxes = img_metas[0]['box_type_3d'](bboxes, 9)
 

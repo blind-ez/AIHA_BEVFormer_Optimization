@@ -39,10 +39,11 @@ queue_length = 4 # each sequence contains `queue_length` frames.
 # set runtime options
 from datetime import datetime
 runtime_options = dict(
-    oracle_test=True,
     prune_bev_queries=True,
+    prune_based_on_gt=False,
+    prune_based_on_prev_preds=True,
     padding_radius=6.0,
-    record_num_queries=True,
+    record_num_queries=False,
     num_queries_log_path=f"log/num_queries/num_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 )
 
@@ -206,7 +207,7 @@ test_pipeline = [
         ])
 ]
 
-if runtime_options['oracle_test']:
+if runtime_options['prune_based_on_gt']:
     test_pipeline.insert(0, dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False))
     test_pipeline[-1]['transforms'][-1]['keys'].extend(['gt_bboxes_3d', 'gt_labels_3d'])
 

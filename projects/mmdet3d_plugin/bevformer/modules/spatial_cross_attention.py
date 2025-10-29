@@ -120,7 +120,7 @@ class SpatialCrossAttention(BaseModule):
              Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
 
-        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+        if kwargs['frame_cache']['apply_pruning_this_frame']:
             reference_points_cam = reference_points_cam[:, :, kwargs['frame_cache']['active_bev_idxs'], :, :]
             bev_mask = bev_mask[:, :, kwargs['frame_cache']['active_bev_idxs'], :]
 

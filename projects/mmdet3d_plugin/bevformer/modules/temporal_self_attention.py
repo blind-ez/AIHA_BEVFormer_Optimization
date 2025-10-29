@@ -181,7 +181,7 @@ class TemporalSelfAttention(BaseModule):
 
             # value = torch.cat([query, query], 0)
 
-        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+        if kwargs['frame_cache']['apply_pruning_this_frame']:
             query = query[:, kwargs['frame_cache']['active_bev_idxs'], :]
             query_pos = query_pos[:, kwargs['frame_cache']['active_bev_idxs'], :]
 
@@ -198,7 +198,7 @@ class TemporalSelfAttention(BaseModule):
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
         assert self.num_bev_queue == 2
 
-        if kwargs['frame_cache']['apply_bev_queries_pruning']:
+        if kwargs['frame_cache']['apply_pruning_this_frame']:
             query = torch.cat([value[:bs][:, kwargs['frame_cache']['active_bev_idxs'], :], query], -1)
         else:
             query = torch.cat([value[:bs], query], -1)
@@ -231,7 +231,7 @@ class TemporalSelfAttention(BaseModule):
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.stack(
                 [spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
-            if kwargs['frame_cache']['apply_bev_queries_pruning']:
+            if kwargs['frame_cache']['apply_pruning_this_frame']:
                 sampling_locations = reference_points[:, kwargs['frame_cache']['active_bev_idxs'], :, :][:, :, None, :, None, :] \
                     + sampling_offsets \
                     / offset_normalizer[None, None, None, :, None, :]

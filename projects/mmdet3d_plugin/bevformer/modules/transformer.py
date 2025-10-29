@@ -7,20 +7,24 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn.init import normal_
+from torchvision.transforms.functional import rotate
+
 from mmcv.cnn import xavier_init
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
+from mmcv.runner import force_fp32, auto_fp16
 from mmcv.runner.base_module import BaseModule
 
 from mmdet.models.utils.builder import TRANSFORMER
-from torch.nn.init import normal_
+
 from projects.mmdet3d_plugin.models.utils.visual import save_tensor
-from mmcv.runner.base_module import BaseModule
-from torchvision.transforms.functional import rotate
+from projects.mmdet3d_plugin.models.utils.bricks import run_time
+
 from .temporal_self_attention import TemporalSelfAttention
 from .spatial_cross_attention import MSDeformableAttention3D
 from .decoder import CustomMSDeformableAttention
-from projects.mmdet3d_plugin.models.utils.bricks import run_time
-from mmcv.runner import force_fp32, auto_fp16
+
+from custom_modules.bbox_utils import predict_bbox_center_from_vel
 
 
 @TRANSFORMER.register_module()
@@ -139,6 +143,15 @@ class PerceptionTransformer(BaseModule):
         shift_x = shift_x * self.use_shift
         shift = bev_queries.new_tensor(
             [shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
+
+        if kwargs['runtime_options']['prune_bev_queries'] and kwargs['runtime_options']['prune_based_on_prev_preds']:
+            if kwargs['frame_cache']['apply_pruning_this_frame']:
+                predicted_bbox_centers = predict_bbox_center_from_vel(
+                    prev_preds=kwargs['frame_cache']['prev_bbox_preds'],
+                    ego_yaw=kwargs['img_metas'][0]['can_bus'][-1] / 180 * np.pi,
+                    ego_shift=shift * bev_w * grid_length_x
+                )
+                kwargs['frame_cache'].update(ref_lidar_coords=predicted_bbox_centers)
 
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:

@@ -4,17 +4,22 @@
 #  Modified by Zhiqi Li
 # ---------------------------------------------
 
-import torch
-from mmcv.runner import force_fp32, auto_fp16
-from mmdet.models import DETECTORS
-from mmdet3d.core import bbox3d2result
-from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
-from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 import time
 import copy
 import numpy as np
-import mmdet3d
+import torch
+
+from mmcv.runner import force_fp32, auto_fp16
+from mmdet.models import DETECTORS
+from mmdet3d import core as mmdet3d_core
+from mmdet3d.core import bbox3d2result
+from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
+
+from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
+
+from custom_modules.bbox_utils import denormalize_bbox
+from custom_modules.coord_utils import lidar_coords_to_bev_coords
 
 
 @DETECTORS.register_module()
@@ -244,7 +249,10 @@ class BEVFormer(MVXTwoStageDetector):
 
         if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
             # the first sample of each scene is truncated
+            self.sample_idx = 0
             self.prev_frame_info['prev_bev'] = None
+        else:
+            self.sample_idx += 1
         # update idx
         self.prev_frame_info['scene_token'] = img_metas[0][0]['scene_token']
 
@@ -265,12 +273,43 @@ class BEVFormer(MVXTwoStageDetector):
         kwargs.update(runtime_options=self.runtime_options)
         kwargs.update(frame_cache=dict())
 
-        new_prev_bev, bbox_results = self.simple_test(
+        if self.runtime_options['prune_bev_queries']:
+            assert self.runtime_options['prune_based_on_gt'] != self.runtime_options['prune_based_on_prev_preds']
+
+        if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_prev_preds']:
+            if self.sample_idx == 0 or len(self.prev_frame_info['prev_bbox_preds']) == 0:
+                kwargs['frame_cache'].update(apply_pruning_this_frame=False)
+            else:
+                kwargs['frame_cache'].update(apply_pruning_this_frame=True)
+                kwargs['frame_cache'].update(prev_bbox_preds=self.prev_frame_info['prev_bbox_preds'])
+
+        outs, bbox_results = self.simple_test(
             img_metas[0], img[0], prev_bev=self.prev_frame_info['prev_bev'], **kwargs)
+
+        if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_prev_preds']:
+            cls_scores = outs['all_cls_scores'][-1, 0]
+            bbox_preds = outs['all_bbox_preds'][-1, 0]
+
+            preds_mask = cls_scores.max(1).values.sigmoid() > 0.1
+            bbox_preds = bbox_preds[preds_mask]
+
+            if kwargs['frame_cache']['apply_pruning_this_frame']:
+                bbox_bev_coords = lidar_coords_to_bev_coords(bbox_preds[:, :2], bev_h=200, bev_w=200)
+                bbox_bev_idxs = (bbox_bev_coords[:, 1] * 200) + bbox_bev_coords[:, 0]
+
+                preds_mask = (bbox_bev_idxs[:, None] == kwargs['frame_cache']['active_bev_idxs'][None, :]).any(-1)
+
+                bbox_preds = bbox_preds[preds_mask]
+
+            bbox_preds = denormalize_bbox(bbox_preds)
+            bbox_preds[:, 2] = bbox_preds[:, 2] - bbox_preds[:, 5] * 0.5
+
+            self.prev_frame_info['prev_bbox_preds'] = bbox_preds
+
         # During inference, we save the BEV features and ego motion of each timestamp.
         self.prev_frame_info['prev_pos'] = tmp_pos
         self.prev_frame_info['prev_angle'] = tmp_angle
-        self.prev_frame_info['prev_bev'] = new_prev_bev
+        self.prev_frame_info['prev_bev'] = outs['bev_embed']
         return bbox_results
 
     def simple_test_pts(self, x, img_metas, prev_bev=None, rescale=False, **kwargs):
@@ -283,15 +322,15 @@ class BEVFormer(MVXTwoStageDetector):
             bbox3d2result(bboxes, scores, labels)
             for bboxes, scores, labels in bbox_list
         ]
-        return outs['bev_embed'], bbox_results
+        return outs, bbox_results
 
     def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False, **kwargs):
         """Test function without augmentaiton."""
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
 
         bbox_list = [dict() for i in range(len(img_metas))]
-        new_prev_bev, bbox_pts = self.simple_test_pts(
+        outs, bbox_pts = self.simple_test_pts(
             img_feats, img_metas, prev_bev, rescale=rescale, **kwargs)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
-        return new_prev_bev, bbox_list
+        return outs, bbox_list
