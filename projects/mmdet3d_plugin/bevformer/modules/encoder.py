@@ -235,6 +235,37 @@ class BEVFormerEncoder(TransformerLayerSequence):
             if len(ref_bev_coords_list) == 0:
                 kwargs['frame_cache'].update(apply_pruning_this_frame=False)
             else:
+                if kwargs['runtime_options']['fixed_bev_boundary_selection']:
+                    front_width = kwargs['runtime_options']['front_width']
+                    other_width = kwargs['runtime_options']['other_width']
+
+                    forward_boundary_xs = torch.arange(bev_w)[None, :].expand(front_width, -1)
+                    forward_boundary_ys = torch.arange(bev_w-front_width, bev_w)[:, None].expand(-1, bev_w)
+                    forward_boundary_coords = torch.stack([forward_boundary_xs, forward_boundary_ys], dim=-1)
+                    forward_boundary_coords = forward_boundary_coords.reshape(-1, 2)
+
+                    if other_width != 0:
+                        backward_boundary_xs = torch.arange(bev_w)[None, :].expand(other_width, -1)
+                        backward_boundary_ys = torch.arange(other_width)[:, None].expand(-1, bev_w)
+                        backward_boundary_coords = torch.stack([backward_boundary_xs, backward_boundary_ys], dim=-1)
+                        backward_boundary_coords = backward_boundary_coords.reshape(-1, 2)
+
+                        left_boundary_xs = torch.arange(other_width)[None, :].expand(bev_h, -1)
+                        left_boundary_ys = torch.arange(bev_h)[:, None].expand(-1, other_width)
+                        left_boundary_coords = torch.stack([left_boundary_xs, left_boundary_ys], dim=-1)
+                        left_boundary_coords = left_boundary_coords.reshape(-1, 2)
+
+                        right_boundary_xs = torch.arange(bev_h-other_width, bev_h)[None, :].expand(bev_h, -1)
+                        right_boundary_ys = torch.arange(bev_h)[:, None].expand(-1, other_width)
+                        right_boundary_coords = torch.stack([right_boundary_xs, right_boundary_ys], dim=-1)
+                        right_boundary_coords = right_boundary_coords.reshape(-1, 2)
+
+                        boundary_coords = torch.cat([forward_boundary_coords, backward_boundary_coords, left_boundary_coords, right_boundary_coords], dim=0).cuda()
+                    else:
+                        boundary_coords = forward_boundary_coords.cuda()
+
+                    ref_bev_coords_list.append(boundary_coords)
+
                 padded_bev_coords = pad_ref_bev_coords(ref_bev_coords=torch.cat(ref_bev_coords_list, dim=0), padding_offsets=self.padding_offsets, bev_h=bev_h, bev_w=bev_w)
 
                 active_bev_idxs = (padded_bev_coords[:, 1] * bev_w) + padded_bev_coords[:, 0]

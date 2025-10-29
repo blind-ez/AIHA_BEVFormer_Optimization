@@ -327,9 +327,27 @@ class BEVFormer(MVXTwoStageDetector):
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
 
         if self.runtime_options['prune_bev_queries'] and self.runtime_options['prune_based_on_heatmap']:
-            object_like_coords = self.bev_heatmap_head.forward_test(img_feats, img_metas, self.runtime_options['object_score_threshold'], self.runtime_options['mask_score_threshold'])
-            if object_like_coords is not None:
-                kwargs['frame_cache'].update(object_like_coords=object_like_coords)
+            if self.sample_idx == 0:
+                self.img_feats_buffer = [each_scale[:, None, ...] for each_scale in img_feats]
+                self.img_metas_buffer = [dict() for _ in range(len(img_metas))]
+            else:
+                self.img_feats_buffer = [torch.cat([p, c[:, None, ...]], dim=1) for p, c in zip(self.img_feats_buffer, img_feats)]
+
+            cur_len = len(self.img_metas_buffer[0])
+            for p, c in zip(self.img_metas_buffer, img_metas):          
+                p[cur_len] = c
+
+            if self.img_feats_buffer[0].shape[1] == self.runtime_options['temporal_window']:
+                object_like_coords = self.bev_heatmap_head.forward_test(self.img_feats_buffer, self.img_metas_buffer, self.runtime_options['score_threshold'])
+
+                if object_like_coords is not None:
+                    kwargs['frame_cache'].update(object_like_coords=object_like_coords)
+
+                self.img_feats_buffer = [f[:, 1:, ...] for f in self.img_feats_buffer]
+                for m in self.img_metas_buffer:
+                    for t in range(cur_len):
+                        m[t] = copy.deepcopy(m[t+1])
+                    del m[cur_len]
 
         bbox_list = [dict() for i in range(len(img_metas))]
         outs, bbox_pts = self.simple_test_pts(

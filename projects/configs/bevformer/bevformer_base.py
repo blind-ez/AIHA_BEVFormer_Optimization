@@ -40,13 +40,15 @@ queue_length = 4 # each sequence contains `queue_length` frames.
 runtime_options = dict(
     prune_bev_queries=True,
     prune_based_on_gt=False,
-    prune_based_on_prev_preds=False,
+    prune_based_on_prev_preds=True,
     prune_based_on_heatmap=True,
-    object_score_threshold=0.15,
-    mask_score_threshold=0.80,
+    fixed_bev_boundary_selection=False,
+    front_width=10,
+    other_width=0,
+    score_threshold=0.10,
     padding_radius=6.0,
     record_num_queries=True,
-    num_queries_log_path=f"log/num_queries/num_queries_0.15_0.80.txt"
+    num_queries_log_path="log/num_queries/num_queries.txt"
 )
 
 model = dict(
@@ -180,6 +182,7 @@ if runtime_options['prune_bev_queries']:
 if runtime_options['prune_based_on_heatmap']:
     from projects.configs.heatbev.heatbev import model as m
     model.update(bev_heatmap_head=m['bev_heatmap_head'])
+    runtime_options.update(temporal_window=m['bev_heatmap_head']['object_query_decoder']['transformerlayers']['attn_cfg'][0]['num_frames'])
 
 dataset_type = 'CustomNuScenesDataset'
 data_root = 'data/nuscenes/'
