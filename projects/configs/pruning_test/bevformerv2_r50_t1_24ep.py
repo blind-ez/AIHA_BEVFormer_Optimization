@@ -1,10 +1,10 @@
-# mAP: 0.4600
-# mATE: 0.6185
-# mASE: 0.2815
-# mAOE: 0.3660
-# mAVE: 0.3157
-# mAAE: 0.1902
-# NDS: 0.5528
+# mAP: 0.3805
+# mATE: 0.7198
+# mASE: 0.2805
+# mAOE: 0.4131
+# mAVE: 0.7652
+# mAAE: 0.1951
+# NDS: 0.4529
 _base_ = [
     '../_base_/default_runtime.py'
 ]
@@ -30,7 +30,7 @@ input_modality = dict(
 img_norm_cfg = dict(mean=[103.53, 116.28, 123.675], std=[1, 1, 1], to_rgb=False)
 bev_h_ = 200
 bev_w_ = 200
-frames = (-7,-6,-5,-4,-3,-2,-1,0)
+frames = (0,)
 group_detr = 11
 voxel_size = [102.4 / bev_h_, 102.4 / bev_w_, 8]
 ida_aug_conf = {
@@ -172,7 +172,7 @@ runtime_options = dict(
     # fixed_bev_boundary_selection=False,
     # front_width=10,
     # other_width=0,
-    padding_radius=6.0,
+    padding_radius=10.0,
     prune_values_in_encoder=True,
     prune_values_in_decoder=True,
     count_num_qvs_every_frame=False,
@@ -219,7 +219,6 @@ model = dict(
             type='PerceptionTransformerV2',
             embed_dims=_dim_,
             frames=frames,
-            inter_channels=_dim_*2,
             encoder=dict(
                 type='BEVFormerEncoder',
                 num_layers=6,
@@ -361,7 +360,7 @@ model = dict(
 model.update(runtime_options=runtime_options)
 
 if runtime_options['prune_based_on_heatmap']:
-    from projects.configs.heatbev.heatbev import model as m
+    from projects.configs.heatbev.heatbev_bevformerv2_r50_t1_24ep import model as m
     model.update(heatmap_head=m['heatmap_head'])
 
 if runtime_options['prune_based_on_gt']:

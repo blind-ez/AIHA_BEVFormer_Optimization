@@ -194,7 +194,7 @@ class BEVFormerV2(MVXTwoStageDetector):
         else:
             return self.forward_test(**kwargs)
 
-    def obtain_history_bev(self, img_dict, img_metas_dict, **kwargs):
+    def obtain_history_bev(self, img_feats_dict, img_metas_dict, **kwargs):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated.
         """
         # Modify: roll back to previous version for single frame
@@ -202,23 +202,16 @@ class BEVFormerV2(MVXTwoStageDetector):
         self.eval()
         prev_bev = OrderedDict({i: None for i in self.frames})
         with torch.no_grad():
-            for t in img_dict.keys():
-                img = img_dict[t]
-                img_metas = [img_metas_dict[t], ]
-
-                if self.runtime_options['run_backbone_fp16']:
-                    with autocast():
-                        img_feats = self.extract_feat(img=img, img_metas=img_metas)
-                        for i, feat in enumerate(img_feats):
-                            img_feats[i] = feat.float()
+            for t in img_feats_dict.keys():
+                img_feats = img_feats_dict[t]
+                if img_feats is None:
+                    continue
                 else:
-                    img_feats = self.extract_feat(img=img, img_metas=img_metas)
+                    img_metas = [img_metas_dict[t], ]
 
-                if self.num_levels:
-                    img_feats = img_feats[:self.num_levels]
-                bev = self.pts_bbox_head(
-                    img_feats, img_metas, prev_bev=None, only_bev=True, **kwargs)
-                prev_bev[t] = bev.detach()
+                    bev = self.pts_bbox_head(
+                        img_feats, img_metas, prev_bev=None, only_bev=True, **kwargs)
+                    prev_bev[t] = bev.detach()
         if is_training:
             self.train()
         return list(prev_bev.values())
@@ -278,14 +271,17 @@ class BEVFormerV2(MVXTwoStageDetector):
         # update idx
         self.prev_frame_info['scene_token'] = img_metas[0][0][0]['scene_token']
 
+        if self.sample_idx == 0:
+            self.prev_frame_info['prev_img_feats'] = {i: None for i in self.frames if i != 0}
+
         tmp_pos = copy.deepcopy(img_metas[0][0][0]['can_bus'][:3])
         tmp_angle = copy.deepcopy(img_metas[0][0][0]['can_bus'][-1])
-        if self.sample_idx != 0:
-            img_metas[0][0][0]['can_bus'][:3] -= self.prev_frame_info['prev_pos']
-            img_metas[0][0][0]['can_bus'][-1] -= self.prev_frame_info['prev_angle']
-        else:
+        if self.sample_idx == 0:
             img_metas[0][0][0]['can_bus'][-1] = 0
             img_metas[0][0][0]['can_bus'][:3] = 0
+        else:
+            img_metas[0][0][0]['can_bus'][:3] -= self.prev_frame_info['prev_pos']
+            img_metas[0][0][0]['can_bus'][-1] -= self.prev_frame_info['prev_angle']
 
         kwargs.update(runtime_options=self.runtime_options)
         kwargs.update(frame_cache=dict())
@@ -374,7 +370,12 @@ class BEVFormerV2(MVXTwoStageDetector):
                 )
                 kwargs['frame_cache'].update(predicted_bbox_centers=predicted_bbox_centers)
 
-        prev_bev = self.obtain_history_bev(img_dict, prev_img_metas, **kwargs)
+        prev_bev = self.obtain_history_bev(self.prev_frame_info['prev_img_feats'], prev_img_metas, **kwargs)
+
+        for i in self.frames:
+            if i < -1:
+                self.prev_frame_info['prev_img_feats'][i] = copy.deepcopy(self.prev_frame_info['prev_img_feats'][i+1])
+        self.prev_frame_info['prev_img_feats'][-1] = img_feats
 
         bbox_list = [dict() for i in range(len(img_metas))]
         outs, bbox_pts = self.simple_test_pts(

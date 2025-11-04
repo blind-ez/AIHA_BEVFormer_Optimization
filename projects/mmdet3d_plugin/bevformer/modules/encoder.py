@@ -293,10 +293,10 @@ class BEVFormerEncoder(TransformerLayerSequence):
                 if kwargs['runtime_options']['prune_values_in_encoder']:
                     kwargs['frame_cache']['num_qvs'].update(v=kwargs['frame_cache']['value_mask'].sum().item())
                 else:
-                    kwargs['frame_cache']['num_qvs'].update(v=6*30825)
+                    kwargs['frame_cache']['num_qvs'].update(v=6*spatial_shapes.prod(1).sum().item())
             else:
-                kwargs['frame_cache']['num_qvs'].update(self_attn_q=200*200)
-                kwargs['frame_cache']['num_qvs'].update(v=6*30825)
+                kwargs['frame_cache']['num_qvs'].update(self_attn_q=bev_h*bev_w)
+                kwargs['frame_cache']['num_qvs'].update(v=6*spatial_shapes.prod(1).sum().item())
 
         for lid, layer in enumerate(self.layers):
             output = layer(

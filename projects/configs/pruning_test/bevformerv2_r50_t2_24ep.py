@@ -172,7 +172,7 @@ runtime_options = dict(
     # fixed_bev_boundary_selection=False,
     # front_width=10,
     # other_width=0,
-    padding_radius=6.0,
+    padding_radius=10.0,
     prune_values_in_encoder=True,
     prune_values_in_decoder=True,
     count_num_qvs_every_frame=False,
@@ -360,7 +360,7 @@ model = dict(
 model.update(runtime_options=runtime_options)
 
 if runtime_options['prune_based_on_heatmap']:
-    from projects.configs.heatbev.heatbev import model as m
+    from projects.configs.heatbev.heatbev_bevformerv2_r50_t2_24ep import model as m
     model.update(heatmap_head=m['heatmap_head'])
 
 if runtime_options['prune_based_on_gt']:
