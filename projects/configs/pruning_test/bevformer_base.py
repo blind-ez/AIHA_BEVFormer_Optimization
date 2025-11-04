@@ -177,10 +177,11 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
+model.update(bev_size=[bev_h_, bev_w_])
 model.update(runtime_options=runtime_options)
 
 if runtime_options['prune_based_on_heatmap']:
-    from projects.configs.heatbev.heatbev import model as m
+    from projects.configs.heatbev.heatbev_bevformer_base import model as m
     model.update(heatmap_head=m['heatmap_head'])
 
 dataset_type = 'CustomNuScenesDataset'

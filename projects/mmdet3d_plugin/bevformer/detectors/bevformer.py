@@ -46,6 +46,7 @@ class BEVFormer(MVXTwoStageDetector):
                  test_cfg=None,
                  pretrained=None,
                  video_test_mode=False,
+                 bev_size=None,
                  runtime_options=None
                  ):
 
@@ -69,6 +70,7 @@ class BEVFormer(MVXTwoStageDetector):
             'prev_angle': 0,
         }
 
+        self.bev_h, self.bev_w = bev_size
         self.runtime_options = runtime_options
 
         self.heatmap_head = builder.build_head(heatmap_head) if heatmap_head is not None else None
@@ -292,8 +294,8 @@ class BEVFormer(MVXTwoStageDetector):
             bbox_preds = bbox_preds[preds_mask]
 
             if kwargs['frame_cache']['apply_pruning_this_frame']:
-                bbox_bev_coords = lidar_coords_to_bev_coords(bbox_preds[:, :2], bev_h=200, bev_w=200)
-                bbox_bev_idxs = (bbox_bev_coords[:, 1] * 200) + bbox_bev_coords[:, 0]
+                bbox_bev_coords = lidar_coords_to_bev_coords(bbox_preds[:, :2], self.bev_h, self.bev_w)
+                bbox_bev_idxs = (bbox_bev_coords[:, 1] * self.bev_w) + bbox_bev_coords[:, 0]
 
                 preds_mask = (bbox_bev_idxs[:, None] == kwargs['frame_cache']['active_bev_idxs'][None, :]).any(-1)
 

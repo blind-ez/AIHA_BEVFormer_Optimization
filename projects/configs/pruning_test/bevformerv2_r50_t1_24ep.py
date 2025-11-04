@@ -1,10 +1,10 @@
-# mAP: 0.4199
-# mATE: 0.6689
-# mASE: 0.2814
-# mAOE: 0.3915
-# mAVE: 0.3834
-# mAAE: 0.1928
-# NDS: 0.5182
+# mAP: 0.3805
+# mATE: 0.7198
+# mASE: 0.2805
+# mAOE: 0.4131
+# mAVE: 0.7652
+# mAAE: 0.1951
+# NDS: 0.4529
 _base_ = [
     '../_base_/default_runtime.py'
 ]
@@ -30,7 +30,7 @@ input_modality = dict(
 img_norm_cfg = dict(mean=[103.53, 116.28, 123.675], std=[1, 1, 1], to_rgb=False)
 bev_h_ = 200
 bev_w_ = 200
-frames = (-1, 0,)
+frames = (0,)
 group_detr = 11
 voxel_size = [102.4 / bev_h_, 102.4 / bev_w_, 8]
 ida_aug_conf = {
@@ -360,7 +360,7 @@ model = dict(
 model.update(runtime_options=runtime_options)
 
 if runtime_options['prune_based_on_heatmap']:
-    from projects.configs.heatbev.heatbev import model as m
+    from projects.configs.heatbev.heatbev_bevformerv2_r50_t1_24ep import model as m
     model.update(heatmap_head=m['heatmap_head'])
 
 if runtime_options['prune_based_on_gt']:
